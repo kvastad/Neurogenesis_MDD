@@ -1,1 +1,6 @@
-# Neurogenesis_MDD
+# Neurogenesis and Major Depressive Disorder (MDD)
+
+MDD is increasingly linked to neuroplasticity, yet the developmental origins of vulnerability and how it relates to neurogenesis remain unclear. Here, we identify a temporally restricted window of putative genetic risk in the human hippocampus. Integrating trait-associated gene sets with single-nucleus RNA sequencing of childhood hippocampus, we show that MDD-associated genes are preferentially expressed in developing neuronal populations, with peak enrichment during the transition from neuroblasts to young granule neurons (NB–YGN). Stage-specific analyses reveal distinct patterns of genetic risk for other neuropsychiatric and neurodegenerative traits, highlighting both shared and disorder-specific cellular vulnerabilities. Retrospective ¹⁴C birth-dating in adult hippocampus identifies a subset of individuals with life-long reduced neurogenesis, linking early developmental disruption to adult susceptibility. Together, these findings suggest that MDD risk is embedded during early neuronal maturation, providing a framework for how polygenic and environmental factors may converge on hippocampal circuitry to shape lifelong mental health.
+
+
+Here, we provide scripts used for the analysis and figures in our publication. The code for re-creating the manuscript figures is stored in their corresponding folders.
