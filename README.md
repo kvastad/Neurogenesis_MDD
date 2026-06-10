@@ -4,3 +4,10 @@ MDD is increasingly linked to neuroplasticity, yet the developmental origins of 
 
 
 Here, we provide scripts used for the analysis and figures in our publication. The code for re-creating the manuscript figures is stored in their corresponding folders.
+
+
+**Schematics tudy Overview. a)** Hippocampal neurogenesis and the granule cell lineage. **b)** Modes of neuronal cell turnover in the hippocampus. **c)** Different approaches to modelling the turnover rate dynamics. NSC = Neuronal stem cell. INP = Intermediate progenitors. NB = Neuroblasts. YGN = Young granule cells (Immature granule cells). GN = Granule cells (Mmature granule cells).
+
+<div style="text-align: right;"> 
+  <img src="images/Study_overview.png" alt="Study overview" width="10000"/> 
+</div>
