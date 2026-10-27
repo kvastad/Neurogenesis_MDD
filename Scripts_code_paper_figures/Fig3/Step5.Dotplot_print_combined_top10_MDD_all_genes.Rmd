@@ -1,0 +1,224 @@
+---
+title: "Step5.Dotplot_print_combined_top10_MDD_all_genes"
+output: 
+  rmarkdown::html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: readable
+vignette: >
+  %\VignetteIndexEntry{My Standalone Vignette}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+---
+
+Load libraries
+```{r, message=FALSE, warning=FALSE}
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(tidyverse)
+library(cowplot)
+```
+
+
+Load data
+```{r, message=FALSE}
+# List all files matching pattern
+files <- list.files(pattern = "^GO_Genes_MDD_all_stratified_pt_window_.*\\.csv$")
+
+# Read files into a named list
+go_list <- lapply(files, read_csv2)
+
+# Name the list elements based on the part after "GO_Genes_MDD_all_stratified_pt_window_" and before ".csv"
+names(go_list) <- sub("^GO_Genes_MDD_all_stratified_pt_window_(.*)\\.csv$", "\\1", files)
+
+# Check
+names(go_list)
+
+```
+
+
+
+# Plot
+
+```{r, fig.width=12, fig.height=12}
+# Desired order
+group_order <- c("8", "9")
+
+# Assign custom colors
+group_colors <- c("8" = "#8DA0CB", 
+                  "9" = "#A6D854")
+
+# Prepare a combined dataframe
+combined_df <- lapply(group_order, function(g) {
+  df <- go_list[[g]]
+  
+  if (is.null(df) || nrow(df) == 0) {
+    df <- tibble(
+      term_name = "No data",
+      p_value = NA,
+      intersection_size = NA,
+      term_size = NA,
+      group = g
+    )
+  } else {
+    df <- df %>%
+      mutate(
+        p_value = as.numeric(p_value),
+        intersection_size = as.numeric(intersection_size),
+        term_size = as.numeric(term_size),
+        group = g
+      )
+  }
+  
+  df[1:min(10, nrow(df)), ]
+}) %>% bind_rows()
+
+# Make group a factor to preserve order
+combined_df$group <- factor(combined_df$group, levels = group_order)
+
+library(forcats)
+
+combined_df <- combined_df %>%
+  mutate(term_label = ifelse(is.na(p_value), "No data", term_name)) %>%
+  arrange(group, desc(p_value)) %>%
+  mutate(term_label = fct_inorder(term_label))
+
+
+# Plot with colored fills
+p <- ggplot(combined_df, aes(
+      y = term_label,
+      x = -log10(p_value),
+      size = intersection_size / term_size,
+      fill = group
+    )) +
+  geom_point(shape = 21, color = "grey30") +  # color = border, fill = group
+  scale_fill_manual(values = group_colors) +
+  scale_size(range = c(4, 14)) +
+  theme_minimal(base_size = 20) +
+  labs(
+    x = "-log10(adj.p-value)",
+    y = "",
+    size = "Gene Ratio",
+    fill = "Group"
+  ) +
+  ggtitle("MDD") +
+  theme(
+    axis.text.y = element_text(size = 20),
+    legend.position = "right"
+  )
+
+cowplot::plot_grid(p, ncol = 1)
+
+```
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("plots/GO_BP_MDD_combined_vertical_top10_all_genes.pdf", width = 12, height = 8)  # width & height in inches
+
+cowplot::plot_grid(p, ncol = 1)
+
+# Close PDF device
+dev.off()
+```
+
+
+```{r}
+# Desired order
+group_order <- c("8", "9")
+
+# Assign custom colors
+group_colors <- c(
+  "8" = "#8DA0CB", 
+  "9" = "#A6D854"
+)
+
+# Prepare combined dataframe
+combined_df <- lapply(group_order, function(g) {
+  df <- go_list[[g]]
+  
+  if (is.null(df) || nrow(df) == 0) {
+    tibble(
+      term_name = "No data",
+      p_value = NA,
+      group = g
+    )
+  } else {
+    df %>%
+      mutate(
+        p_value = as.numeric(p_value),
+        group = g
+      ) %>%
+      slice_head(n = 10)
+  }
+}) %>%
+  bind_rows()
+
+# Preserve group order
+combined_df$group <- factor(
+  combined_df$group,
+  levels = group_order
+)
+
+# Order biological processes by smallest p-value
+# so that the most significant terms appear at the top
+combined_df <- combined_df %>%
+  group_by(term_name) %>%
+  mutate(min_p = min(p_value, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(
+    term_name = forcats::fct_reorder(term_name, min_p, .desc = TRUE)
+  )
+
+# Plot
+p <- ggplot(
+  combined_df,
+  aes(
+    x = -log10(p_value),
+    y = term_name,
+    fill = group
+  )
+) +
+  geom_col(
+    position = position_dodge(width = 0.8),
+    width = 0.7
+  ) +
+  scale_fill_manual(values = group_colors,breaks = rev(group_order)) +
+  theme_minimal(base_size = 15) +
+  labs(
+    x = "-log10(adj. p-value)",
+    y = "Biological Process",
+    fill = "Group"
+  ) +
+  ggtitle("MDD") +
+  theme(
+    axis.text.y = element_text(size = 10),
+    legend.position = "right"
+  )
+
+cowplot::plot_grid(p, ncol = 1)
+```
+
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("plots/GO_BP_MDD_combined_vertical_top10_all_genes_barplot.pdf", width = 8, height = 5)  # width & height in inches
+
+cowplot::plot_grid(p, ncol = 1)
+
+# Close PDF device
+dev.off()
+```
+
+
+# Notes
+```{r}
+sessionInfo()
+```
+

@@ -1,0 +1,306 @@
+---
+title: "Step5.Generate_Trajectory_Metacell_with_STEAM"
+output: 
+  rmarkdown::html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: readable
+vignette: >
+  %\VignetteIndexEntry{My Standalone Vignette}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+---
+
+Generate pseudotime trajectory MetaCells (unsupervised).
+
+# Load libraries
+
+Load the necessary libraries.
+```{r, message=FALSE, warning=FALSE}
+library(Seurat)
+library(SeuratObject)
+library(dplyr)
+library(destiny)
+library(STEAM)
+library(future)
+library(ggplot2)
+library(viridis)
+library(reshape2)
+library(scales)
+```
+
+
+# Load data
+
+Load Seurat object.
+```{r}
+lineage_cells <- readRDS("Seurat_objects/Postnatal_human_seurat_v5_GNxEarly_filtered_trajectory_lineage_cells_harmony_no_outliers.rds")
+lineage_cells
+
+head(lineage_cells[[]])
+```
+
+
+Check number of cells per cell type of the cluster annotation you want to create Trajectory MetaCells from.
+```{r}
+table(lineage_cells$cell_anno)
+```
+
+
+Check numbar of genes and counts:
+```{r, warning=FALSE, fig.height=7}
+cell_colors <- c(
+  "NSC"  = "#FC8D62",
+  "INP"  = "#E78AC3",
+  "NB"   = "#8DA0CB",
+  "YGN"  = "#A6D854",
+  "GN"   = "#66C2A5"
+)
+
+# Reorder the identities to match the order in cell_colors
+lineage_cells$cell_anno <- factor(lineage_cells$cell_anno, levels = names(cell_colors))
+
+
+VlnPlot(lineage_cells, features = c("nFeature_RNA", "nCount_RNA"), ncol = 1, group.by = "cell_anno",cols = cell_colors)
+```
+
+
+# Trajectory MetaCells
+
+```{r}
+generate_trajectory_metacells <- function(seurat.obj,
+                                          rank.col = "cell_rank",
+                                          window.size = 10,
+                                          step.size = NULL,
+                                          celltype.col = NULL) {
+  # Default step size = window size
+  if (is.null(step.size)) step.size <- window.size
+  
+  # Extract metadata
+  meta <- seurat.obj@meta.data
+  if (!rank.col %in% colnames(meta)) {
+    stop(paste("Metadata column", rank.col, "not found in object"))
+  }
+  
+  # Order cells only by rank.col
+  meta <- meta[order(meta[[rank.col]]), , drop = FALSE]
+  
+  ranked.cells <- rownames(meta)
+  
+  # Generate window start positions
+  starts <- seq(1, length(ranked.cells), by = step.size)
+  
+  # Create list of Seurat subsets
+  window.list <- lapply(starts, function(s) {
+    e <- s + window.size - 1
+    cells.in.window <- ranked.cells[s:min(e, length(ranked.cells))]
+    subset(seurat.obj, cells = cells.in.window)
+  })
+  
+  # Name each element
+  names(window.list) <- paste0(
+    "rank_", starts,
+    "_to_",
+    pmin(starts + window.size - 1, length(ranked.cells))
+  )
+  
+  return(window.list)
+}
+
+```
+
+
+
+```{r}
+window.list <- generate_trajectory_metacells(lineage_cells,
+                                           rank.col = "cell_rank", # unsupervised
+                                           window.size = 10,
+                                           celltype.col = "cell_anno")
+```
+
+
+
+```{r}
+get_assay_data <- function(se, what = c("counts", "data", "scale.data")) {
+  what <- match.arg(what)
+  seurat_ver <- utils::packageVersion("SeuratObject")
+  
+  # Determine assay
+  if (seurat_ver >= "5.0.0") {
+    assays_available <- SeuratObject::Assays(se)
+    if ("Spatial" %in% assays_available) {
+      assay <- "Spatial"
+    } else if ("RNA" %in% assays_available) {
+      assay <- "RNA"
+    } else {
+      assay <- SeuratObject::DefaultAssay(se)
+    }
+  } else {
+    assays_available <- SeuratObject::Assays(se)
+    if ("RNA" %in% assays_available) {
+      assay <- "RNA"
+    } else {
+      assay <- SeuratObject::DefaultAssay(se)
+    }
+  }
+  
+  message("Using assay: ", assay, " | slot/layer: ", what)
+  
+  # Access data
+  if (seurat_ver >= "5.0.0") {
+    SeuratObject::GetAssayData(se, assay = assay, layer = what)
+  } else {
+    SeuratObject::GetAssayData(se, assay = assay, slot = what)
+  }
+}
+
+```
+
+
+```{r}
+aggregate_trajectory_metacells <- function(window.list,
+                                           anno.col = "cell_anno") {
+  
+  meta.list <- list()
+  count.list <- list()
+  
+  for (i in seq_along(window.list)) {
+    win <- window.list[[i]]
+    
+    # --- Access counts ---
+    counts <- get_assay_data(win, what = "counts")
+    counts <- Matrix::rowSums(counts)
+    count.list[[i]] <- counts
+    
+    # --- Build metadata ---
+    MetaCell_rank <- i
+    meta <- win@meta.data
+    
+    if (!anno.col %in% colnames(meta)) {
+      stop(paste("Column", anno.col, "not in metadata"))
+    }
+    
+    # Aggregate annotation counts
+    anno.tab <- table(meta[[anno.col]])
+    anno.list <- as.list(anno.tab)
+    
+    # Combine metadata
+    meta.list[[i]] <- c(
+      list(MetaCell_rank = MetaCell_rank, MetaCell_ncells = nrow(meta)),
+      anno.list
+    )
+  }
+  
+  # Determine annotation columns
+  anno.cols <- unique(unlist(lapply(meta.list, function(x) setdiff(names(x), c("MetaCell_rank", "MetaCell_ncells")))))
+  
+  # Build metadata dataframe with consistent column order
+  df <- do.call(rbind, lapply(meta.list, function(x) {
+    for (a in anno.cols) {
+      if (!a %in% names(x)) x[[a]] <- 0
+    }
+    x[c("MetaCell_rank", "MetaCell_ncells", anno.cols)]
+  }))
+  
+  df <- as.data.frame(df)
+  rownames(df) <- names(window.list)
+  
+  # Convert numeric-like columns to numeric
+  df$MetaCell_rank <- as.numeric(df$MetaCell_rank)
+  df$MetaCell_ncells <- as.numeric(df$MetaCell_ncells)
+  
+  for (col in anno.cols) {
+    if (all(grepl("^[0-9\\.]+$", df[[col]]))) {
+      df[[col]] <- as.numeric(df[[col]])
+    }
+  }
+  
+  # --- Build count matrix ---
+  count.mat <- do.call(cbind, count.list)
+  colnames(count.mat) <- names(window.list)
+  
+  # --- Create Seurat object ---
+  meta.obj <- SeuratObject::CreateSeuratObject(
+    counts = count.mat,
+    meta.data = df
+  )
+  
+  return(meta.obj)
+}
+
+```
+
+
+```{r}
+MetaCells <- aggregate_trajectory_metacells(window.list, anno.col = "cell_anno")
+head(MetaCells[[]])
+tail(MetaCells[[]])
+```
+
+
+```{r}
+# Extract metadata
+meta <- MetaCells[[]]
+
+# Select relevant columns: MetaCell_rank + cell types
+cell_types <- c("NSC", "INP", "NB", "YGN", "GN")
+plot_df <- meta[, c("MetaCell_rank", cell_types)]
+
+# Convert to long format
+plot_long <- reshape2::melt(plot_df, id.vars = "MetaCell_rank", 
+                            variable.name = "CellType", value.name = "Count")
+
+# Optional: compute fraction instead of raw counts
+plot_long$Fraction <- plot_long$Count / meta$MetaCell_ncells[plot_long$MetaCell_rank]
+
+```
+
+
+```{r}
+ggplot(plot_long, aes(x = MetaCell_rank, y = Fraction, fill = CellType)) +
+  geom_bar(stat = "identity", width = 1) +
+  scale_fill_manual(values = cell_colors) +
+  labs(x = "MetaCell rank", y = "Fraction of cells",
+       title = "Cell type composition along trajectory") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+```
+
+
+Save
+```{r}
+saveRDS(MetaCells, file = "Seurat_objects/Postnatal_human_seurat_v5_GNxEarly_filtered_trajectory_lineage_cells_harmony_no_outliers_metacells.rds")
+```
+
+
+Normalize data with SCTransform.
+```{r, message=FALSE, warning=FALSE, results='hide', eval=T}
+MetaCells_normalized <- SCTransform(MetaCells,assay = "RNA",return.only.var.genes = T)
+```
+
+
+```{r}
+MetaCells_normalized
+head(MetaCells_normalized)
+```
+
+
+Save
+```{r}
+saveRDS(MetaCells_normalized, file = "Seurat_objects/Postnatal_human_seurat_v5_GNxEarly_filtered_trajectory_lineage_cells_harmony_no_outliers_metacells_SCTransform.rds")
+```
+
+
+
+<details>
+  <summary>Click to show Session Info</summary>
+
+```{r}
+sessionInfo()
+```
+
+</details>
+

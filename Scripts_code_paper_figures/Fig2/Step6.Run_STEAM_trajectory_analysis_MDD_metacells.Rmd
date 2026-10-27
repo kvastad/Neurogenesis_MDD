@@ -1,0 +1,1093 @@
+---
+title: 'Step6.Run_STEAM_trajectory_analysis_MDD_metacells'
+output: 
+  rmarkdown::html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: readable
+vignette: >
+  %\VignetteIndexEntry{My Standalone Vignette}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+---
+
+Run STEAM trajectory analysis (unsupervised).
+
+# Load libraries
+
+Load the necessary libraries.
+```{r, message=FALSE, warning=FALSE}
+library(Seurat)
+library(SeuratObject)
+library(dplyr)
+library(MASS)
+library(viridis)
+library(stringr)
+library(patchwork)
+library(ggplot2)
+library(readr)
+library(STEAM)
+library(tidyr)
+library(reshape2)
+library(ggnewscale)
+```
+
+
+# Load data
+
+Load Seurat object.
+```{r}
+se <- readRDS("Seurat_objects/Postnatal_human_seurat_v5_GNxEarly_filtered_trajectory_lineage_cells_harmony_no_outliers_metacells.rds")
+se
+head(se[[]])
+```
+
+
+Normalize
+```{r}
+
+DefaultAssay(se) <- "RNA"
+se
+
+se <- se %>%
+  NormalizeData()
+se
+```
+
+
+
+Load ranked gene lists (here from Open Targets). Please note that it is essential for downstream analysis that the gene lists are ranked from this point forward to do empirical selection of top genetic genes.
+```{r class.source = 'fold-show'}
+
+OpenTargets_MDD_Genetic_ <- as.character(t(read.table(file = "data/OpenTargets/ranked_gene_sets/OT-MONDO_0002009-associated-targets-9_15_2026-v26_06_weights_genetics_only_MDD_ranked.csv")))
+length(OpenTargets_MDD_Genetic_)
+
+```
+
+
+# Prepare data for STEAM analysis
+
+Filter out genes not present in the Seurat object.
+```{r}
+# Extract gene names from the Seurat object
+gene_names <- rownames(se)
+
+# Remove genes not present in the Seurat object from the gene lists
+OpenTargets_MDD_Genetic_ <- unique(OpenTargets_MDD_Genetic_[OpenTargets_MDD_Genetic_ %in% gene_names])
+length(OpenTargets_MDD_Genetic_)
+
+OpenTargets_MDD_Genetic_top_ <- OpenTargets_MDD_Genetic_[1:160]
+length(OpenTargets_MDD_Genetic_top_)
+```
+
+
+Generate sliding window gene sets from gene lists. Select your choice of trait abbreviation (disease_abbr) and a gene list descriptive term (ot_gene_set_label). We select a window size of 50 genes, moving by 10 genes for each window.
+```{r, eval=T}
+window_rank_list_MDD_Genetic <- generate_sliding_windows(OpenTargets_MDD_Genetic_, window_size = 50, step_size = 10, disease_abbr = "MDD", ot_gene_set_label = "Genetic")
+```
+
+
+Add gene sets to a list.
+```{r, eval=T}
+all_gene_sets_OpenTargets <- list(OpenTargets_MDD_Genetic_=OpenTargets_MDD_Genetic_,OpenTargets_MDD_Genetic_top_=OpenTargets_MDD_Genetic_top_)
+```
+
+
+Merge all gene sets into one list.
+```{r, eval=T}
+all_gene_sets <- all_gene_sets_OpenTargets
+all_gene_sets <- append(all_gene_sets,window_rank_list_MDD_Genetic)
+```
+
+
+Calculate the average gene expression per gene list and check the percentage of genes present in the Seurat object. It is important that all genes used are present in the Seurat object, otherwise the downstream statistic assumptions are invalid.
+```{r, eval=T}
+score.mat <- matrix(data = NA, nrow = length(all_gene_sets), ncol = 1, dimnames = list(names(all_gene_sets), "% of genes present"))
+
+for (i in 1:length(all_gene_sets)) {
+  genes <- unlist(all_gene_sets[i]) 
+  score.mat[i] <- mean(genes %in% rownames(se))
+  se <- AddModuleScore(se,list(genes), ctrl = 100, name = list(names(all_gene_sets[i])))
+}
+
+score.mat*100
+```
+
+
+# Trajectory enrichment
+
+## Select top trait genes
+
+Check expression of trajectory marker genes. NSC = NES, INP = MKI67, NB = EOMES, YGN = DCX, GN = CALB1.
+```{r}
+genes <- c("NES", "MKI67", "EOMES", "DCX", "CALB1")
+
+DefaultAssay(se) # check which assay data is fetched from
+
+plots <- lapply(genes, function(g) {
+  df <- FetchData(se, vars = c("MetaCell_rank", g))
+  ggplot(df, aes(x = MetaCell_rank, y = .data[[g]])) +
+    geom_point(alpha = 0.6) +
+    theme_classic() +
+    ggtitle(g)+
+    ylab("Normalized Expression")+
+    xlab("Pseudotime ranked MetaCells")
+})
+
+wrap_plots(plots)
+
+```
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("plots/trajectory_marker_genes.pdf", width = 8, height = 6)  # width & height in inches
+
+wrap_plots(plots)
+
+# Close PDF device
+dev.off()
+```
+
+
+Look at the Open Targets sliding window score patterns to empirically pick top genes. This selection can also be assisted by the pattern score (max of LOESS R² and Linear R²). Here top 11 windows looks interesting i.e., top 150 genes.
+```{r}
+generate_trait_score_trajectory <- function(
+    seurat_obj, 
+    meta_prefix, 
+    n_vars, 
+    rank_var = "MetaCell_rank",     
+    ncol = 9, 
+    point_alpha = 0.3, 
+    point_size = 0.8, 
+    smooth_color = "red", 
+    show_se = TRUE
+) {
+  
+  # Construct variable names
+  vars <- paste0(meta_prefix, 1:n_vars, "_1")
+  
+  # Fetch data, including the chosen ranking variable
+  df <- FetchData(seurat_obj, vars = c(rank_var, vars))
+  
+  # Reshape data
+  df_long <- pivot_longer(df, cols = vars, names_to = "variable", values_to = "value") %>%
+    mutate(variable = factor(variable, levels = vars))
+  
+  # ----- pattern score calculation -----
+  calc_pattern_score <- function(df_sub) {
+    lm_fit <- lm(value ~ df_sub[[rank_var]], data = df_sub)
+    r2_lm <- summary(lm_fit)$r.squared
+    
+    loess_fit <- loess(value ~ df_sub[[rank_var]], data = df_sub)
+    pred_loess <- predict(loess_fit)
+    r2_loess <- 1 - (sum((df_sub$value - pred_loess)^2) /
+                     sum((df_sub$value - mean(df_sub$value))^2))
+    
+    tibble(
+      variable = unique(df_sub$variable),
+      r2_linear = r2_lm,
+      r2_loess = r2_loess,
+      pattern_score = max(r2_lm, r2_loess)
+    )
+  }
+  
+  pattern_scores <- df_long %>%
+    group_split(variable) %>%
+    purrr::map_dfr(calc_pattern_score)
+  
+  # ----- plot -----
+  p <- ggplot(df_long, aes_string(rank_var, "value")) +   # <- aes_string allows dynamic x-variable
+    geom_point(alpha = point_alpha, size = point_size) +
+    geom_smooth(method = "loess", se = show_se, color = smooth_color) +
+    facet_wrap(~ variable, scales = "free_y", ncol = ncol) +
+    theme_classic() +
+    xlab(rank_var) +
+    ylab("Window Score")
+  
+  # Attach pattern scores as attribute
+  attr(p, "pattern_scores") <- pattern_scores
+  return(p)
+}
+
+```
+
+
+```{r, fig.width=20, fig.height=15, eval=T}
+tst_gg <- generate_trait_score_trajectory(
+  seurat_obj = se,
+  meta_prefix = "MDD_Genetic_Rank",
+  rank_var = "MetaCell_rank",
+  n_vars = 80,
+  ncol = 9
+)
+
+tst_gg   # prints the plot
+
+```
+
+PDF
+```{r, eval=T}
+pdf(file = "STEAM_plots/Trajectory_trait_score_plots_MDD.pdf", height = 20, width = 20)
+
+tst_gg
+
+dev.off()
+```
+
+Plot the computed amount of variance explained by LOESS minus that of the linear model, a large value means the curve is much more complex than a straight line. Use this to assist in evaluating which trait windows to include for picking top genes.
+```{r, fig.width=12, eval=T}
+pattern_df <- attr(tst_gg, "pattern_scores") #Extract pattern scores.
+
+p <- ggplot(pattern_df, aes(x = variable, y = pattern_score)) +
+  geom_col() +
+  theme_classic() +
+  xlab("Gene set window rank") +
+  ylab("Pattern score (max of LOESS R² and Linear R²)") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
+
+p
+```
+
+
+PDF
+```{r, eval=T}
+pdf(file = "STEAM_plots/Trajectory_trait_score_pattern_MDD.pdf", height = 6, width = 12)
+
+p
+
+dev.off()
+```
+
+
+## Assign pseudotime windows
+
+
+Add pseudotime windows to metadata.
+```{r}
+assign_pseudotime_windows <- function(
+  seurat_obj,
+  pseudotime_col = "MetaCell_rank",
+  window_size = 100,                  
+  output_col = "pseudotime_windows"
+) {
+  meta <- seurat_obj@meta.data
+  cells <- rownames(meta)
+
+  # Extract pseudotime column
+  pt_values <- meta[[pseudotime_col]]
+  
+  df <- data.frame(
+    cell = cells,
+    pseudotime = pt_values,
+    stringsAsFactors = FALSE
+  )
+
+  # Order cells by pseudotime
+  df_ordered <- df[order(df$pseudotime, na.last = TRUE), , drop = FALSE]
+
+  # Identify non-NA pseudotime entries
+  non_na_idx <- which(!is.na(df_ordered$pseudotime))
+  n_non_na <- length(non_na_idx)
+
+  # Handle case with no pseudotime values
+  if (n_non_na == 0) {
+    seurat_obj@meta.data[[output_col]] <- NA
+    return(seurat_obj)
+  }
+
+  # ----- Create windows -----
+  window_ids <- ceiling(seq_len(n_non_na) / window_size)
+
+  # Merge last window if too small
+  last_window_size <- n_non_na - (max(window_ids) - 1) * window_size
+  if (last_window_size < window_size && max(window_ids) > 1) {
+    window_ids[window_ids == max(window_ids)] <- max(window_ids) - 1
+  }
+
+  # Assign window labels
+  labels <- rep(NA_character_, nrow(df_ordered))
+  labels[non_na_idx] <- paste0("pt_window_", window_ids)
+
+  # Return labels in original cell order
+  labels_by_cell <- setNames(labels, df_ordered$cell)
+  seurat_obj@meta.data[[output_col]] <- labels_by_cell[rownames(meta)]
+
+  return(seurat_obj)
+}
+
+```
+
+
+Assign and check pseudotime windows.
+```{r}
+se <- assign_pseudotime_windows(
+  se,
+  pseudotime_col = "MetaCell_rank",  
+  window_size = 15                   
+)
+
+table(se$pseudotime_windows)
+
+```
+
+
+Plot pseudotime window assignment.
+```{r, fig.width=15}
+# Extract metadata
+meta <- se[[]]
+
+# Set colors
+cell_colors <- c(
+  "NSC"  = "#FC8D62",
+  "INP"  = "#E78AC3",
+  "NB"   = "#8DA0CB",
+  "YGN"  = "#A6D854",
+  "GN"   = "#66C2A5"
+)
+
+# Select cell types
+cell_types <- c("NSC", "INP", "NB", "YGN", "GN")
+
+# Ensure MetaCell_rank is an ordered factor
+meta$MetaCell_rank <- factor(meta$MetaCell_rank,
+                             levels = unique(meta$MetaCell_rank),
+                             ordered = TRUE)
+
+# Melt to long format
+plot_long <- melt(meta[, c("MetaCell_rank", cell_types, "pseudotime_windows")],
+                  id.vars = c("MetaCell_rank", "pseudotime_windows"),
+                  variable.name = "CellType", value.name = "Count")
+
+# Compute fraction per MetaCell
+plot_long <- plot_long %>%
+  group_by(MetaCell_rank) %>%
+  mutate(Fraction = Count / sum(Count)) %>%
+  ungroup()
+
+# Compute start, end, and center x position for each pseudotime window
+window_labels <- plot_long %>%
+  filter(!is.na(pseudotime_windows)) %>%
+  group_by(pseudotime_windows) %>%
+  summarise(start = min(as.numeric(MetaCell_rank)),
+            end   = max(as.numeric(MetaCell_rank)),
+            .groups = "drop") %>%
+  mutate(xpos = (start + end)/2)
+
+# Determine x-axis labels: 1, 10, 20, ...
+rank_starts <- as.numeric(gsub("rank_|_to.*", "", levels(meta$MetaCell_rank)))
+label_ranks <- levels(meta$MetaCell_rank)[rank_starts %% 15 == 0 | rank_starts == 1]
+
+# Plot
+ggplot(plot_long, aes(x = MetaCell_rank, y = Fraction, fill = CellType)) +
+  geom_bar(stat = "identity", width = 1) +
+  # Vertical dashed lines for window separation (skip first)
+  geom_vline(data = window_labels %>% filter(start != min(start)),
+             aes(xintercept = start - 0.5),
+             linetype = "dashed", color = "black") +
+  # Window labels centered above each range
+  geom_text(data = window_labels, aes(x = xpos, y = 1.05, label = pseudotime_windows),
+            inherit.aes = FALSE, vjust = 0, size = 4) +
+  scale_x_discrete(breaks = label_ranks) +
+  scale_fill_manual(values = cell_colors) +
+  labs(x = "MetaCell rank", y = "Fraction of cells",
+       title = "Cell type composition along trajectory with pseudotime windows") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+```
+
+
+
+# Fisher's exact test (DEGs)
+
+## Calculate DEGs
+
+DE analysis, for all pseudotime_windows.
+```{r}
+se
+DefaultAssay(se) <- "RNA"
+
+se <- SetIdent(se, value = "pseudotime_windows")
+
+DEG_genes_all_tested <- FindAllMarkers(se, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25,slot = "data", return.thresh = 1)
+
+DEG_genes <- subset(DEG_genes_all_tested, subset = p_val_adj <= 0.05) # using only significant DEG
+```
+
+
+Save DEG results
+```{r, eval=T}
+write.table(DEG_genes_all_tested,file="DEG_output/DEG_genes_all_tested_MDD.csv", col.names = T, row.names = F,quote = FALSE,sep = ";")
+```
+
+
+## Fisher's exact test
+
+
+```{r, eval=FALSE}
+run_fisher_test_degs_v3 <- function(se, DEG_genes, OT_genes, adjust_method = "bonferroni", test_alternative = "greater") {
+  
+  total_genes <- rownames(se)
+  
+  # Prepare lists to store results
+  fisher_results_list <- list()
+  
+  for (cluster in unique(DEG_genes$cluster)) {
+    cluster_data <- DEG_genes[DEG_genes$cluster == cluster, ]
+    cluster_data$Genetically_Associated <- cluster_data$gene %in% OT_genes
+    
+    # Counts
+    A <- sum(cluster_data$Genetically_Associated) # DEG & OT
+    C <- length(cluster_data$gene) - A # DEG & not OT
+    not_DE_genes <- setdiff(total_genes, cluster_data$gene)
+    B <- sum(not_DE_genes %in% OT_genes) # non-DEG & OT
+    D <- length(not_DE_genes) - B # non-DEG & not OT
+    
+    # 2x2 contingency table
+    fisher_matrix <- matrix(c(A, B, C, D), nrow = 2, byrow = TRUE,
+                            dimnames = list(c("DEG", "Not_DEG"), c("OT_gene", "Not_OT_gene")))
+    
+    # Fisher test
+    fisher_test <- fisher.test(fisher_matrix, alternative = test_alternative)
+    
+    # Proportions
+    prop_DEG <- A / (A + C)
+    prop_background <- B / (B + D)
+    
+    # OR and log2_OR
+    OR <- (A * D) / (B * C)
+    log2_OR <- log2(OR)
+    
+    # Combine everything in one row
+    fisher_results_list[[cluster]] <- data.frame(
+      cluster = cluster,
+      A = A, C = C, B = B, D = D,
+      prop_DEG = prop_DEG,
+      prop_background = prop_background,
+      OR = OR,
+      log2_OR = log2_OR,
+      CI_lower = fisher_test$conf.int[1],
+      CI_upper = fisher_test$conf.int[2],
+      p_value = fisher_test$p.value,
+      stringsAsFactors = FALSE
+    )
+  }
+  
+  # Combine all clusters
+  fisher_results <- do.call(rbind, fisher_results_list)
+  
+  # Adjust p-values
+  fisher_results$adj_p_value <- p.adjust(fisher_results$p_value, method = adjust_method)
+  
+  return(fisher_results)
+}
+
+```
+
+
+```{r}
+run_fisher_test_degs_v3 <- function(se, DEG_genes, OT_genes, adjust_method = "bonferroni", test_alternative = "greater") {
+  
+  total_genes <- rownames(se)
+  
+  # Prepare lists to store results
+  fisher_results_list <- list()
+  
+  for (cluster in unique(DEG_genes$cluster)) {
+    cluster_data <- DEG_genes[DEG_genes$cluster == cluster, ]
+    cluster_data$Genetically_Associated <- cluster_data$gene %in% OT_genes
+    
+    # Counts
+    A <- sum(cluster_data$Genetically_Associated) # DEG & OT
+    B <- length(cluster_data$gene) - A # DEG & not OT
+    not_DE_genes <- setdiff(total_genes, cluster_data$gene)
+    C <- sum(not_DE_genes %in% OT_genes) # non-DEG & OT
+    D <- length(not_DE_genes) - C # non-DEG & not OT
+    
+    # 2x2 contingency table
+    fisher_matrix <- matrix(c(A, B, C, D), nrow = 2, byrow = TRUE,
+                            dimnames = list(c("DEG", "Not_DEG"), c("OT_gene", "Not_OT_gene")))
+    
+    # Fisher test
+    fisher_test <- fisher.test(fisher_matrix, alternative = test_alternative)
+    
+    # Proportions
+    prop_DEG <- A / (A + B)
+    prop_background <- C / (C + D)
+    
+    # OR and log2_OR
+    OR <- (A * D) / (B * C)
+    log2_OR <- log2(OR)
+    
+    # Combine everything in one row
+    fisher_results_list[[cluster]] <- data.frame(
+      cluster = cluster,
+      A = A, B = B, C = C, D = D,
+      prop_DEG = prop_DEG,
+      prop_background = prop_background,
+      OR = OR,
+      log2_OR = log2_OR,
+      CI_lower = fisher_test$conf.int[1],
+      CI_upper = fisher_test$conf.int[2],
+      p_value = fisher_test$p.value,
+      stringsAsFactors = FALSE
+    )
+  }
+  
+  # Combine all clusters
+  fisher_results <- do.call(rbind, fisher_results_list)
+  
+  # Adjust p-values
+  fisher_results$adj_p_value <- p.adjust(fisher_results$p_value, method = adjust_method)
+  
+  return(fisher_results)
+}
+
+```
+
+
+Run Fisher's exact test among the pseudotime window DEGs.
+```{r}
+fisher_pt_window_results <- run_fisher_test_degs_v3(se = se, DEG_genes = DEG_genes, OT_genes = OpenTargets_MDD_Genetic_top_, adjust_method = "bonferroni", test_alternative = "greater")
+```
+
+
+```{r}
+# Define the desired order of clusters
+desired_levels <- paste0("pt_window_", 1:length(table(se$pseudotime_windows)))  
+
+# Convert 'cluster' to a factor with this order
+fisher_pt_window_results$cluster <- factor(fisher_pt_window_results$cluster, levels = desired_levels)
+
+# Reorder the rows based on the factor
+fisher_pt_window_results <- fisher_pt_window_results[order(fisher_pt_window_results$cluster), ]
+
+# View the reordered table
+fisher_pt_window_results
+
+```
+
+
+Save Fisher's exact test results
+```{r, eval=T}
+write.table(fisher_pt_window_results,file="DEG_output/Fishers_exact_test_MDD_top_genes.csv", col.names = T, row.names = F,quote = FALSE,sep = ";")
+```
+
+
+Run Fisher's exact test among the pseudotime window DEGs.
+```{r}
+fisher_pt_window_results_all_genes <- run_fisher_test_degs_v3(se = se, DEG_genes = DEG_genes, OT_genes = OpenTargets_MDD_Genetic_, adjust_method = "bonferroni", test_alternative = "greater")
+```
+
+
+```{r}
+# Define the desired order of clusters
+desired_levels <- paste0("pt_window_", 1:length(table(se$pseudotime_windows)))  
+
+# Convert 'cluster' to a factor with this order
+fisher_pt_window_results_all_genes$cluster <- factor(fisher_pt_window_results_all_genes$cluster, levels = desired_levels)
+
+# Reorder the rows based on the factor
+fisher_pt_window_results_all_genes <- fisher_pt_window_results_all_genes[order(fisher_pt_window_results_all_genes$cluster), ]
+
+# View the reordered table
+fisher_pt_window_results_all_genes
+
+```
+
+Save Fisher's exact test results
+```{r, eval=T}
+write.table(fisher_pt_window_results_all_genes,file="DEG_output/Fishers_exact_test_MDD_all_genes.csv", col.names = T, row.names = F,quote = FALSE,sep = ";")
+```
+
+
+
+## Plot results
+
+
+
+```{r, fig.height=6, fig.width=7}
+#library(ggplot2)
+#library(dplyr)
+#library(viridis)  # for viridis color scale
+
+# Define the desired order of clusters
+desired_levels <- paste0("pt_window_", 1:length(table(se$pseudotime_windows)))
+fisher_pt_window_results$cluster <- factor(fisher_pt_window_results$cluster, levels = desired_levels)
+
+# Add significance stars with four levels
+fisher_plot_data <- fisher_pt_window_results %>%
+  mutate(
+    signif = case_when(
+      adj_p_value <= 1e-4  ~ "****",
+      adj_p_value <= 1e-3  ~ "***",
+      adj_p_value <= 0.01  ~ "**",
+      adj_p_value <= 0.05  ~ "*",
+      TRUE                 ~ ""
+    )
+  )
+
+# Plot
+p1 <- ggplot(fisher_plot_data, aes(x = cluster, y = prop_DEG*100)) +
+  geom_col(aes(fill = log2_OR), width = 0.6) +             # bars colored by log2_OR
+  geom_text(aes(label = signif, y = prop_DEG*100 + 0.005),    # stars above bars
+            vjust = 0, size = 5, color = "black") +
+  scale_fill_viridis(option = "D", direction = 1) +       # viridis colors
+  labs(
+    x = "Pseudotime windows",
+    y = "Percent OT genes among DEGs",
+    fill = "log2(OR)",
+    title = "Top MDD genes"
+  ) +
+  theme_classic(base_size = 16) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "right"
+  )
+
+p1
+```
+
+
+
+PDF
+```{r}
+pdf(file = "STEAM_plots/fishers_exact_test_DEGup_topSTEAM_MDD.pdf", height = 7, width = 6)
+
+p1
+
+dev.off()
+```
+
+
+```{r, fig.height=6, fig.width=7}
+#library(ggplot2)
+#library(dplyr)
+#library(viridis)  # for viridis color scale
+
+# Define the desired order of clusters
+desired_levels <- paste0("pt_window_", 1:length(table(se$pseudotime_windows)))
+fisher_pt_window_results_all_genes$cluster <- factor(fisher_pt_window_results_all_genes$cluster, levels = desired_levels)
+
+# Add significance stars with four levels
+fisher_plot_data <- fisher_pt_window_results_all_genes %>%
+  mutate(
+    signif = case_when(
+      adj_p_value <= 1e-4  ~ "****",
+      adj_p_value <= 1e-3  ~ "***",
+      adj_p_value <= 0.01  ~ "**",
+      adj_p_value <= 0.05  ~ "*",
+      TRUE                 ~ ""
+    )
+  )
+
+# Plot
+p1 <- ggplot(fisher_plot_data, aes(x = cluster, y = prop_DEG*100)) +
+  geom_col(aes(fill = log2_OR), width = 0.6) +             # bars colored by log2_OR
+  geom_text(aes(label = signif, y = prop_DEG*100 + 0.005),    # stars above bars
+            vjust = 0, size = 5, color = "black") +
+  scale_fill_viridis(option = "D", direction = 1) +       # viridis colors
+  labs(
+    x = "Pseudotime windows",
+    y = "Percent OT genes among DEGs",
+    fill = "log2(OR)",
+    title = "All MDD genes"
+  ) +
+  theme_classic(base_size = 16) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "right"
+  )
+
+p1
+```
+
+
+
+
+PDF
+```{r}
+pdf(file = "STEAM_plots/fishers_exact_test_DEGup_all_genes_STEAM_MDD.pdf", height = 7, width = 6)
+
+p1
+
+dev.off()
+```
+
+
+# Summary plots
+
+
+```{r, fig.width=18}
+# -------------------------------
+# Ensure CellType factor and colors
+# -------------------------------
+cell_order <- c("NSC", "INP", "NB", "YGN", "GN")
+plot_long$CellType <- factor(plot_long$CellType, levels = cell_order)
+
+cell_colors <- c(
+  "NSC" = "#FC8D62",
+  "INP" = "#E78AC3",
+  "NB"  = "#8DA0CB",
+  "YGN" = "#A6D854",
+  "GN"  = "#66C2A5"
+)
+
+# -------------------------------
+# Pseudotime window positions
+# -------------------------------
+window_labels <- meta %>%
+  filter(!is.na(pseudotime_windows)) %>%
+  group_by(pseudotime_windows) %>%
+  summarise(
+    start = min(as.numeric(MetaCell_rank)),
+    end   = max(as.numeric(MetaCell_rank)),
+    .groups = "drop"
+  ) %>%
+  mutate(xpos = (start + end)/2)
+
+window_starts <- window_labels$start[-1]
+
+# -------------------------------
+# rectangle_1: adj_p_value color
+# -------------------------------
+fisher_results_plot <- fisher_pt_window_results %>%
+  dplyr::select(cluster, adj_p_value, OR) %>%
+  inner_join(
+    window_labels %>% dplyr::select(pseudotime_windows, start, end),
+    by = c("cluster" = "pseudotime_windows")
+  ) %>%
+  mutate(
+    logp = -log10(adj_p_value),
+    xmin = start - 0.4,
+    xmax = end + 0.4,
+    ymin = 1.02,   # adjusted to appear above bars (max Fraction = 1)
+    ymax = 1.07,
+    stars = case_when(
+      adj_p_value < 0.001 ~ "",
+      adj_p_value < 0.01  ~ "",
+      adj_p_value < 0.05  ~ "",
+      TRUE                   ~ ""
+    ),
+    xmid = (xmin + xmax)/2,
+    ymid = (ymin + ymax)/2,
+    log2_OR = log2(OR)
+  )
+
+# -------------------------------
+# rectangle_2: adj_p_value significance stars
+# -------------------------------
+fisher_results_plot2 <- fisher_pt_window_results %>%
+  dplyr::select(cluster, adj_p_value) %>%
+  inner_join(
+    window_labels %>% dplyr::select(pseudotime_windows, start, end),
+    by = c("cluster" = "pseudotime_windows")
+  ) %>%
+  mutate(
+    xmin = start - 0.4,
+    xmax = end + 0.4,
+    ymin = 1.03, #1.075
+    ymax = 1.125,
+    sig = factor(
+      ifelse(adj_p_value < 0.05, "Significant", "Not significant"),
+      levels = c("Not significant", "Significant")
+    ),
+    stars = case_when(
+      adj_p_value < 0.0001 ~ "****",
+      adj_p_value < 0.001 ~ "***",
+      adj_p_value < 0.01  ~ "**",
+      adj_p_value < 0.05  ~ "*",
+      TRUE                     ~ ""
+    ),
+    xmid = (xmin + xmax)/2,
+    ymid = (ymin + ymax)/2
+  )
+
+sig_colors <- c(
+  "Not significant" = "transparent",
+  "Significant"     = "transparent"
+)
+
+# -------------------------------
+# X-axis labels
+# -------------------------------
+label_ranks <- levels(meta$MetaCell_rank)[
+  suppressWarnings(as.numeric(levels(meta$MetaCell_rank))) %% 15 == 0 |
+    suppressWarnings(as.numeric(levels(meta$MetaCell_rank))) == 1
+]
+
+# -------------------------------
+# Plot
+# -------------------------------
+p <- ggplot(plot_long, aes(x = MetaCell_rank, y = Fraction, fill = CellType)) +
+
+  geom_bar(stat = "identity", width = 1) +
+
+  geom_vline(xintercept = window_starts - 0.5,
+             linetype = "dashed", color = "black") +
+
+  geom_text(data = window_labels,
+            aes(x = xpos, y = 1.14, label = pseudotime_windows),
+            inherit.aes = FALSE, vjust = 0, size = 5) +
+
+  scale_fill_manual(values = cell_colors, name = "Cell Type") +
+
+  # rectangle_1: plot settings
+  ggnewscale::new_scale_fill() +
+  geom_rect(
+    data = fisher_results_plot,
+    aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = log2_OR),
+    inherit.aes = FALSE,
+    color = NA
+  ) +
+  geom_text(
+    data = fisher_results_plot,
+    aes(x = xmid, y = ymid, label = stars),
+    inherit.aes = FALSE,
+    size = 5
+  ) +
+  scale_fill_viridis_c(option = "D", direction = 1,
+                       name = "log2(OR)") +
+
+  # rectangle_2: plot settings
+  ggnewscale::new_scale_fill() +
+  geom_rect(
+    data = fisher_results_plot2,
+    aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = sig),
+    inherit.aes = FALSE,
+    color = NA,
+    show.legend = FALSE
+  ) +
+  geom_text(
+    data = fisher_results_plot2,
+    aes(x = xmid, y = ymid, label = stars),
+    inherit.aes = FALSE,
+    size = 10
+  ) +
+  scale_fill_manual(values = sig_colors,
+                    name = "Significance") +
+
+  scale_x_discrete(breaks = label_ranks) +
+  scale_y_continuous(limits = c(0, 1.15), breaks = seq(0, 1, 0.5)) +
+
+  labs(x = "MetaCell rank", y = "Fraction of cells",
+       title = "Top genes MDD: cell type composition along trajectory with pseudotime windows") +
+
+  theme_classic() +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 15),
+    axis.text.y = element_text(size = 15),
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 15)
+  )
+
+p
+
+```
+
+
+
+```{r, fig.width=18}
+# -------------------------------
+# Ensure CellType factor and colors
+# -------------------------------
+cell_order <- c("NSC", "INP", "NB", "YGN", "GN")
+plot_long$CellType <- factor(plot_long$CellType, levels = cell_order)
+
+cell_colors <- c(
+  "NSC" = "#FC8D62",
+  "INP" = "#E78AC3",
+  "NB"  = "#8DA0CB",
+  "YGN" = "#A6D854",
+  "GN"  = "#66C2A5"
+)
+
+# -------------------------------
+# Pseudotime window positions
+# -------------------------------
+window_labels <- meta %>%
+  filter(!is.na(pseudotime_windows)) %>%
+  group_by(pseudotime_windows) %>%
+  summarise(
+    start = min(as.numeric(MetaCell_rank)),
+    end   = max(as.numeric(MetaCell_rank)),
+    .groups = "drop"
+  ) %>%
+  mutate(xpos = (start + end)/2)
+
+window_starts <- window_labels$start[-1]
+
+# -------------------------------
+# rectangle_1: adj_p_value color
+# -------------------------------
+fisher_results_plot <- fisher_pt_window_results %>%
+  dplyr::select(cluster, adj_p_value, OR) %>%
+  inner_join(
+    window_labels %>% dplyr::select(pseudotime_windows, start, end),
+    by = c("cluster" = "pseudotime_windows")
+  ) %>%
+  mutate(
+    logp = -log10(adj_p_value),
+    xmin = start - 0.4,
+    xmax = end + 0.4,
+    ymin = 1.02,   # adjusted to appear above bars (max Fraction = 1)
+    ymax = 1.07,
+    stars = case_when(
+      adj_p_value < 0.001 ~ "",
+      adj_p_value < 0.01  ~ "",
+      adj_p_value < 0.05  ~ "",
+      TRUE                   ~ ""
+    ),
+    xmid = (xmin + xmax)/2,
+    ymid = (ymin + ymax)/2,
+    log2_OR = log2(OR)
+  )
+
+# -------------------------------
+# rectangle_2: adj_p_value significance stars
+# -------------------------------
+fisher_results_plot2 <- fisher_pt_window_results %>%
+  dplyr::select(cluster, adj_p_value) %>%
+  inner_join(
+    window_labels %>% dplyr::select(pseudotime_windows, start, end),
+    by = c("cluster" = "pseudotime_windows")
+  ) %>%
+  mutate(
+    xmin = start - 0.4,
+    xmax = end + 0.4,
+    ymin = 1.03, #1.075
+    ymax = 1.125,
+    sig = factor(
+      ifelse(adj_p_value < 0.05, "Significant", "Not significant"),
+      levels = c("Not significant", "Significant")
+    ),
+    stars = case_when(
+      adj_p_value < 0.0001 ~ "****",
+      adj_p_value < 0.001 ~ "***",
+      adj_p_value < 0.01  ~ "**",
+      adj_p_value < 0.05  ~ "*",
+      TRUE                     ~ ""
+    ),
+    xmid = (xmin + xmax)/2,
+    ymid = (ymin + ymax)/2
+  )
+
+sig_colors <- c(
+  "Not significant" = "transparent",
+  "Significant"     = "transparent"
+)
+
+# -------------------------------
+# X-axis labels
+# -------------------------------
+label_ranks <- levels(meta$MetaCell_rank)[
+  suppressWarnings(as.numeric(levels(meta$MetaCell_rank))) %% 15 == 0 |
+    suppressWarnings(as.numeric(levels(meta$MetaCell_rank))) == 1
+]
+
+# -------------------------------
+# Plot
+# -------------------------------
+p <- ggplot(plot_long, aes(x = MetaCell_rank, y = Fraction, fill = CellType)) +
+
+  geom_bar(stat = "identity", width = 1) +
+
+  geom_vline(xintercept = window_starts - 0.5,
+             linetype = "dashed", color = "black") +
+
+  geom_text(
+  data = window_labels %>%
+    mutate(label_num = sub(".*_", "", pseudotime_windows)),  # extract text after last underscore
+  aes(x = xpos, y = 1.13, label = label_num),  # use the new label_num column
+  inherit.aes = FALSE,
+  angle = 0,
+  hjust = 0.5,
+  vjust = -0.3,
+  size = 6
+) +
+
+  scale_fill_manual(values = cell_colors, name = "Cell Type") +
+
+  # rectangle_1: plot settings
+  ggnewscale::new_scale_fill() +
+  geom_rect(
+    data = fisher_results_plot,
+    aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = log2_OR),
+    inherit.aes = FALSE,
+    color = NA
+  ) +
+  geom_text(
+    data = fisher_results_plot,
+    aes(x = xmid, y = ymid, label = stars),
+    inherit.aes = FALSE,
+    size = 5
+  ) +
+  scale_fill_viridis_c(option = "D", direction = 1,
+                       name = "log2(OR)") +
+
+  # rectangle_2: plot settings
+  ggnewscale::new_scale_fill() +
+  geom_rect(
+    data = fisher_results_plot2,
+    aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = sig),
+    inherit.aes = FALSE,
+    color = NA,
+    show.legend = FALSE
+  ) +
+  geom_text(
+    data = fisher_results_plot2,
+    aes(x = xmid, y = ymid, label = stars),
+    inherit.aes = FALSE,
+    size = 10
+  ) +
+  scale_fill_manual(values = sig_colors,
+                    name = "Significance") +
+
+  scale_x_discrete(breaks = label_ranks) +
+  scale_y_continuous(limits = c(0, 1.15), breaks = seq(0, 1, 0.5)) +
+
+  labs(x = "MetaCell rank", y = "Fraction of cells",
+       title = "Top genes MDD: cell type composition along trajectory with pseudotime windows") +
+
+  theme_classic() +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 15),
+    axis.text.y = element_text(size = 15),
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 15),
+    plot.title = element_text(size = 20, face = "bold")
+  )
+
+p
+
+```
+
+
+PDF
+```{r}
+pdf(file = "STEAM_plots/fishers_exact_test_DEGup_trajectory_pseudotime_windows_MDD_top_genes.pdf", height = 6, width = 18)
+
+p
+
+dev.off()
+```
+
+
+
+<details>
+  <summary>Click to show Session Info</summary>
+
+```{r}
+sessionInfo()
+```
+
+</details>
+

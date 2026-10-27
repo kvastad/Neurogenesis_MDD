@@ -1,0 +1,583 @@
+---
+title: "Step7.Gene_gene_cor_heatmap"
+output: 
+  rmarkdown::html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: readable
+vignette: >
+  %\VignetteIndexEntry{My Standalone Vignette}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+---
+
+
+# Load libraries
+
+Load the necessary libraries.
+```{r, message=FALSE, warning=FALSE}
+library(Seurat)
+library(SeuratObject)
+library(dplyr)
+library(MASS)
+library(viridis)
+library(stringr)
+library(patchwork)
+library(ggplot2)
+library(readr)
+library(STEAM)
+library(tidyr)
+library(reshape2)
+library(ggnewscale)
+library(ComplexHeatmap)
+library(gprofiler2)
+library(circlize)
+
+```
+
+# Load data
+
+Load Seurat object.
+```{r}
+se <- readRDS("Seurat_objects/Postnatal_human_seurat_v5_GNxEarly_filtered_trajectory_lineage_cells_harmony_no_outliers.rds")
+se
+head(se[[]])
+```
+
+
+Load ranked gene lists (here from Open Targets). Please note that it is essential for downstream analysis that the gene lists are ranked from this point forward to do empirical selection of top genetic genes.
+```{r class.source = 'fold-show'}
+
+OpenTargets_MDD_Genetic_ <- as.character(t(read.table(file = "data/OpenTargets/ranked_gene_sets/OT-MONDO_0002009-associated-targets-9_15_2026-v26_06_weights_genetics_only_MDD_ranked.csv")))
+length(OpenTargets_MDD_Genetic_)
+
+```
+
+
+Filter out genes not present in the Seurat object.
+```{r}
+# Extract gene names from the Seurat object
+gene_names <- rownames(se)
+
+# Remove genes not present in the Seurat object from the gene lists
+OpenTargets_MDD_Genetic_ <- unique(OpenTargets_MDD_Genetic_[OpenTargets_MDD_Genetic_ %in% gene_names])
+length(OpenTargets_MDD_Genetic_)
+
+OpenTargets_MDD_Genetic_top_ <- OpenTargets_MDD_Genetic_[1:160]
+length(OpenTargets_MDD_Genetic_top_)
+```
+
+
+Add pseudotime windows to metadata.
+```{r}
+assign_pseudotime_windows <- function(
+  seurat_obj,
+  pseudotime_col = "MetaCell_rank",
+  window_size = 100,                  
+  output_col = "pseudotime_windows"
+) {
+  meta <- seurat_obj@meta.data
+  cells <- rownames(meta)
+
+  # Extract pseudotime column
+  pt_values <- meta[[pseudotime_col]]
+  
+  df <- data.frame(
+    cell = cells,
+    pseudotime = pt_values,
+    stringsAsFactors = FALSE
+  )
+
+  # Order cells by pseudotime
+  df_ordered <- df[order(df$pseudotime, na.last = TRUE), , drop = FALSE]
+
+  # Identify non-NA pseudotime entries
+  non_na_idx <- which(!is.na(df_ordered$pseudotime))
+  n_non_na <- length(non_na_idx)
+
+  # Handle case with no pseudotime values
+  if (n_non_na == 0) {
+    seurat_obj@meta.data[[output_col]] <- NA
+    return(seurat_obj)
+  }
+
+  # ----- Create windows -----
+  window_ids <- ceiling(seq_len(n_non_na) / window_size)
+
+  # Merge last window if too small
+  last_window_size <- n_non_na - (max(window_ids) - 1) * window_size
+  if (last_window_size < window_size && max(window_ids) > 1) {
+    window_ids[window_ids == max(window_ids)] <- max(window_ids) - 1
+  }
+
+  # Assign window labels
+  labels <- rep(NA_character_, nrow(df_ordered))
+  labels[non_na_idx] <- paste0("pt_window_", window_ids)
+
+  # Return labels in original cell order
+  labels_by_cell <- setNames(labels, df_ordered$cell)
+  seurat_obj@meta.data[[output_col]] <- labels_by_cell[rownames(meta)]
+
+  return(seurat_obj)
+}
+
+```
+
+
+```{r}
+se <- assign_pseudotime_windows(
+  se,
+  pseudotime_col = "cell_rank_ordered",
+  window_size = 110
+)
+
+# Define the desired order of levels
+desired_levels <- paste0("pt_window_", 1:11)
+
+# Reorder the factor
+se$pseudotime_windows <- factor(se$pseudotime_windows, levels = desired_levels)
+
+# Check
+table(se$pseudotime_windows)
+```
+
+
+Get Open Targets gene set and remove genes with zero variance in the SCT assay.
+```{r}
+# Fetch data
+mydata <- FetchData(se, vars = OpenTargets_MDD_Genetic_top_)
+
+# Compute standard deviation for each column
+col_sds <- apply(mydata, 2, sd, na.rm = TRUE)
+
+# Identify columns with zero variance
+zero_var_cols <- names(col_sds[col_sds == 0])
+
+# Print the columns
+zero_var_cols
+
+```
+
+
+# Heatmap
+
+```{r, fig.height=10, fig.width=10}
+# Fetch your data from Seurat object
+mydata <- FetchData(se, vars = OpenTargets_MDD_Genetic_top_)
+
+# Identify and remove zero-variance columns
+col_sds <- apply(mydata, 2, sd, na.rm = TRUE)
+zero_var_cols <- names(col_sds[col_sds == 0])
+mydata_filtered <- mydata[, !colnames(mydata) %in% zero_var_cols]
+
+# Compute Spearman correlation matrix
+cormat <- cor(mydata_filtered, method = "spearman")
+
+# Create a color function for the heatmap
+col_fun <- colorRamp2(c(-1, 0, 1), c("blue", "white", "red"))
+
+# Draw the heatmap
+myheatmap <-  Heatmap(cormat,
+        name = "Spearman\nCorrelation",
+        col = col_fun,
+        show_row_names = TRUE,
+        show_column_names = TRUE,
+        show_row_dend = F,
+        cluster_rows = TRUE,
+        cluster_columns = TRUE,
+        row_names_side = "right",
+        clustering_method_columns = "complete",
+        clustering_method_rows = "complete",
+        row_names_gp = gpar(fontsize = 3),
+        column_names_gp = gpar(fontsize = 3),
+        row_split = 3, 
+        column_split = 3
+)
+
+myheatmap
+```
+
+
+PDF
+```{r, eval=T}
+pdf(file = "plots/Gene_gene_correlation_heatmap_top_160genes_MDD.pdf", height = 10, width = 10)
+
+myheatmap
+
+dev.off()
+```
+
+
+# Functional Enrichment Analysis
+
+```{r}
+dg_cluster1_ <- c(
+  "ZNF608", "KLF7", "NRXN1", "TCF4", "ZBTB20", "PTBP2", "EXOC4",
+  "DENND1A", "ELAVL2", "SETBP1", "CDH4", "MAML3", "MDGA1", "GALNT2",
+  "RSRC1", "REEP3", "NCAM1", "APOE", "MEIS2", "PTAR1", "ASTN2", "B3GLCT",
+  "TCF7L2", "CNTLN", "SPRY2", "ADCY2", "SOX5", "SOX6", "NPAS3",
+  "TBL1XR1", "PAX6", "ERBB4"
+)
+
+
+
+dg_cluster2_ <- c(
+  "NLGN1", "PCDH9", "KCNB1", "SHISA9", "AGBL4", "CELF4", "BCL11B",
+  "PCLO", "CDH9", "GRM5", "PRR16", "RAB27B", "ATP2B1", "CELF2",
+  "LRFN5", "KIRREL3", "SORCS3", "COP1", "CACNA1C", "CNTNAP5", "CADM2",
+  "KLHL29", "MEF2C", "CNTN5", "TENM2", "NEGR1", "ASIC2", "CACNA1E",
+  "RBFOX1", "PPP3CA"
+)
+
+
+
+dg_cluster3_ <- c(
+  "SEMA6D", "ZNF804A", "DCC", "ENOX1", "CTTNBP2", "SGIP1", "GRIK3",
+  "FTO", "PMFBP1", "DRD2", "FGF5", "CHRM2", "C3orf70", "NBAS",
+  "TMEM106B", "DENND1B", "ANO10", "MSRA", "ASTN1", "TRAF3", "NPR3",
+  "CCDC73", "HTR2A", "CDH6", "MST1", "ADARB2", "OTX2", "CASZ1",
+  "ADAMTS5", "COA8", "AGMO", "SLC35C1", "ESR2", "POU5F2", "SLC39A8",
+  "VRK2", "MYH15", "CYP7B1", "RGS6", "TERF1", "METTL9", "FAM120AOS",
+  "ERCC4", "STK24", "BAG5", "PIK3C3", "TMEM161B", "KIF2A", "NRDC",
+  "TANK", "SLC30A9", "FOXP2", "TOX", "IGSF9B", "ZCCHC7", "KIZ", "FHIT",
+  "FADS2", "EMILIN3", "PIPOX", "FAM120A", "DPY19L3", "NPNT", "PTCH1",
+  "ZFHX3", "RASGRP1", "ZMYND8", "AREL1", "GSDME", "BAIAP2", "EYS",
+  "ULK4", "ASCC3", "ARHGAP15", "LINGO1", "SH2B3", "PLCL2", "CNTN4",
+  "MAP3K9", "PUM3", "ACVR1B", "PDE4B", "INPP4B", "RBMS1", "ESR1",
+  "TSNARE1", "KCNG2", "INSYN1", "BEND4", "KCNK9", "LIN28B", "FURIN",
+  "HTT", "DCAF6", "SAMD5", "DCDC1", "PJA1", "TUSC1"
+)
+
+
+```
+
+
+Add gene sets to a list.
+```{r}
+all_gene_sets <- list(dg_cluster1_=dg_cluster1_,dg_cluster2_=dg_cluster2_,dg_cluster3_=dg_cluster3_)
+```
+
+
+```{r}
+score.mat <- matrix(data = NA, nrow = length(all_gene_sets), ncol = 1, dimnames = list(names(all_gene_sets), "% of genes present"))
+
+for (i in 1:length(all_gene_sets)) {
+  genes <- unlist(all_gene_sets[i]) 
+  score.mat[i] <- mean(genes %in% rownames(se))
+  se <- AddModuleScore(se,list(genes), ctrl = 100, name = list(names(all_gene_sets[i])))
+}
+
+score.mat*100
+```
+
+
+```{r}
+make_color_shades <- function(color, n,
+                        direction = c("light_to_dark",
+                                      "dark_to_light",
+                                      "dark_to_light_to_dark",
+                                      "light_to_dark_to_light"),
+                        v_light = 0.95, v_dark = 0.15,
+                        peak_pos = NULL) {
+  
+  direction <- match.arg(direction)
+  
+  # Convert base color to HSV
+  rgb_mat <- grDevices::col2rgb(color) / 255
+  hsv_vals <- grDevices::rgb2hsv(rgb_mat)
+  
+  h <- hsv_vals["h", 1]
+  s <- hsv_vals["s", 1]
+  
+  # Default peak position is middle if not specified
+  if (is.null(peak_pos)) peak_pos <- ceiling(n / 2)
+  if (peak_pos < 1 || peak_pos > n) stop("peak_pos must be between 1 and n")
+  
+  # Generate brightness sequence
+  if (direction == "light_to_dark") {
+    vals <- seq(v_light, v_dark, length.out = n)
+    
+  } else if (direction == "dark_to_light") {
+    vals <- seq(v_dark, v_light, length.out = n)
+    
+  } else if (direction == "dark_to_light_to_dark") {
+    # peak = lightest color at position peak_pos
+    if (peak_pos == 1) {
+      vals <- rep(v_light, n) # edge case: peak at first
+    } else if (peak_pos == n) {
+      vals <- rep(v_light, n) # edge case: peak at last
+    } else {
+      vals_up   <- seq(v_dark, v_light, length.out = peak_pos)
+      vals_down <- seq(v_light, v_dark, length.out = n - peak_pos + 1)[-1]
+      vals <- c(vals_up, vals_down)
+    }
+    
+  } else if (direction == "light_to_dark_to_light") {
+    # valley = darkest color at position peak_pos
+    if (peak_pos == 1 || peak_pos == n) {
+      vals <- rep(v_dark, n) # edge cases
+    } else {
+      vals_down <- seq(v_light, v_dark, length.out = peak_pos)
+      vals_up   <- seq(v_dark, v_light, length.out = n - peak_pos + 1)[-1]
+      vals <- c(vals_down, vals_up)
+    }
+  }
+  
+  # Build hex shades
+  shades <- vapply(vals, function(v) grDevices::hsv(h, s, v), character(1))
+  return(shades)
+}
+
+```
+
+
+
+```{r}
+col_dg1 <- make_color_shades("#377EB8", 11, direction = "light_to_dark")
+col_dg2 <- make_color_shades("#4DAF4A", 11, direction = "dark_to_light")
+col_dg3 <- make_color_shades("#984EA3", 11, direction = "dark_to_light_to_dark")
+```
+
+
+
+```{r, warning=FALSE,fig.height=5,fig.height=7}
+VlnPlot(se, features = c("dg_cluster1_1"), group.by = "pseudotime_windows", cols = col_dg1)
+VlnPlot(se, features = c("dg_cluster2_1"), group.by = "pseudotime_windows", cols = col_dg2)
+VlnPlot(se, features = c("dg_cluster3_1"), group.by = "pseudotime_windows", cols = col_dg3)
+```
+
+
+
+PDF
+```{r, eval=T}
+pdf(file = "plots/Dendrogram_cluster1_top_160genes_MDD.pdf", height = 5, width = 7)
+
+VlnPlot(se, features = c("dg_cluster1_1"), group.by = "pseudotime_windows", cols = col_dg1)
+
+dev.off()
+```
+
+
+PDF
+```{r, eval=T}
+pdf(file = "plots/Dendrogram_cluster2_top_160genes_MDD.pdf", height = 5, width = 7)
+
+VlnPlot(se, features = c("dg_cluster2_1"), group.by = "pseudotime_windows", cols = col_dg2)
+
+dev.off()
+```
+
+
+PDF
+```{r, eval=T}
+pdf(file = "plots/Dendrogram_cluster3_top_160genes_MDD.pdf", height = 5, width = 7)
+
+VlnPlot(se, features = c("dg_cluster3_1"), group.by = "pseudotime_windows", cols = col_dg3)
+
+dev.off()
+```
+
+
+
+## dg_cluster1
+
+GO analysis
+```{r}
+gostres <- gost(query = dg_cluster1_, 
+                organism = "hsapiens", ordered_query = F, # Biological processes
+                multi_query = FALSE, significant = T, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = T, 
+                user_threshold = 0.05, correction_method = "g_SCS", 
+                domain_scope = "annotated", custom_bg = NULL, 
+                numeric_ns = "", sources = NULL, as_short_link = FALSE)
+
+```
+
+
+```{r}
+gostplot(gostres, capped = TRUE, interactive = F)
+```
+
+
+```{r}
+results <- gostres$result
+results <- results[grep("GO:BP",results$source), ]
+results <- arrange(results,p_value)
+```
+
+Save GO results
+```{r, eval=T}
+write_delim(results, "DEG_output/GO_Genes_MDD_top160_dg_cluster1.csv", delim = ";")
+```
+
+
+```{r}
+
+results_plot <- na.omit(results[1:20,])
+
+p <- ggplot() +
+  geom_point(
+    data = results_plot, 
+    aes(
+      x = reorder(term_name, -log10(p_value)), 
+      y = -log10(p_value),
+      size = intersection_size/term_size  # map size
+    ), 
+    color = "grey50",  # outline color
+    fill = "grey70",   # fill color (uniform)
+    shape = 21
+  ) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    x = "GO:BP", 
+    y = "-log10(adj.p-value)", 
+    size = "GeneRatio"
+  ) +
+  ggtitle("dg_cluster1", subtitle = "Top 20") +
+  guides(fill = "none")  # remove fill legend if still present
+
+cowplot::plot_grid(p, ncol = 1)
+```
+
+
+
+## dg_cluster2
+
+GO analysis
+```{r}
+gostres <- gost(query = dg_cluster2_, 
+                organism = "hsapiens", ordered_query = F, # Biological processes
+                multi_query = FALSE, significant = T, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = T, 
+                user_threshold = 0.05, correction_method = "g_SCS", 
+                domain_scope = "annotated", custom_bg = NULL, 
+                numeric_ns = "", sources = NULL, as_short_link = FALSE)
+
+```
+
+
+```{r}
+gostplot(gostres, capped = TRUE, interactive = F)
+```
+
+
+```{r}
+results <- gostres$result
+results <- results[grep("GO:BP",results$source), ]
+results <- arrange(results,p_value)
+```
+
+Save GO results
+```{r, eval=T}
+write_delim(results, "DEG_output/GO_Genes_MDD_top160_dg_cluster2.csv", delim = ";")
+```
+
+
+```{r}
+
+results_plot <- na.omit(results[1:20,])
+
+p <- ggplot() +
+  geom_point(
+    data = results_plot, 
+    aes(
+      x = reorder(term_name, -log10(p_value)), 
+      y = -log10(p_value),
+      size = intersection_size/term_size  # map size
+    ), 
+    color = "grey50",  # outline color
+    fill = "grey70",   # fill color (uniform)
+    shape = 21
+  ) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    x = "GO:BP", 
+    y = "-log10(adj.p-value)", 
+    size = "GeneRatio"
+  ) +
+  ggtitle("dg_cluster2", subtitle = "Top 20") +
+  guides(fill = "none")  # remove fill legend if still present
+
+cowplot::plot_grid(p, ncol = 1)
+```
+
+
+
+
+## dg_cluster3
+
+GO analysis
+```{r}
+gostres <- gost(query = dg_cluster3_, 
+                organism = "hsapiens", ordered_query = F, # Biological processes
+                multi_query = FALSE, significant = T, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = T, 
+                user_threshold = 0.05, correction_method = "g_SCS", 
+                domain_scope = "annotated", custom_bg = NULL, 
+                numeric_ns = "", sources = NULL, as_short_link = FALSE)
+
+```
+
+
+```{r}
+gostplot(gostres, capped = TRUE, interactive = F)
+```
+
+
+```{r}
+results <- gostres$result
+results <- results[grep("GO:BP",results$source), ]
+results <- arrange(results,p_value)
+```
+
+Save GO results
+```{r, eval=T}
+write_delim(results, "DEG_output/GO_Genes_MDD_top160_dg_cluster3.csv", delim = ";")
+```
+
+
+```{r}
+
+results_plot <- na.omit(results[1:20,])
+
+p <- ggplot() +
+  geom_point(
+    data = results_plot, 
+    aes(
+      x = reorder(term_name, -log10(p_value)), 
+      y = -log10(p_value),
+      size = intersection_size/term_size  # map size
+    ), 
+    color = "grey50",  # outline color
+    fill = "grey70",   # fill color (uniform)
+    shape = 21
+  ) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    x = "GO:BP", 
+    y = "-log10(adj.p-value)", 
+    size = "GeneRatio"
+  ) +
+  ggtitle("dg_cluster3", subtitle = "Top 20") +
+  guides(fill = "none")  # remove fill legend if still present
+
+cowplot::plot_grid(p, ncol = 1)
+```
+
+
+# Notes
+
+<details>
+  <summary>Click to show Session Info</summary>
+
+```{r}
+sessionInfo()
+```
+
+</details>
+

@@ -1,0 +1,212 @@
+---
+title: "Dotplot_print_combined_all_genes"
+output: 
+  rmarkdown::html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: readable
+vignette: >
+  %\VignetteIndexEntry{My Standalone Vignette}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+---
+
+Load libraries
+```{r, message=FALSE, warning=FALSE}
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(tidyverse)
+library(cowplot)
+```
+
+
+Load data
+```{r, message=FALSE}
+# List all files matching pattern
+files <- list.files(pattern = "^GO_Genes_MDD_all_genes_.*\\.csv$")
+
+# Read files into a named list
+go_list <- lapply(files, read_csv2)
+
+# Name the list elements based on the part after "GO_Genes_MDD_all_genes_" and before ".csv"
+names(go_list) <- sub("^GO_Genes_MDD_all_genes_(.*)\\.csv$", "\\1", files)
+
+# Check
+names(go_list)
+
+```
+
+
+
+# Plot
+
+```{r, fig.width=7, fig.height=8}
+# Desired order
+group_order <- c("NSC", "INP", "NB", "YGN", "GN")
+
+# Assign custom colors
+group_colors <- c("NSC" = "#FC8D62", 
+                  "INP" = "#E78AC3", 
+                  "NB"  = "#8DA0CB", 
+                  "YGN" = "#A6D854", 
+                  "GN"  = "#66C2A5")
+
+# Prepare a combined dataframe
+combined_df <- lapply(group_order, function(g) {
+  df <- go_list[[g]]
+  
+  if (is.null(df) || nrow(df) == 0) {
+    df <- tibble(
+      term_name = "No data",
+      p_value = NA,
+      intersection_size = NA,
+      term_size = NA,
+      group = g
+    )
+  } else {
+    df <- df %>%
+      mutate(
+        p_value = as.numeric(p_value),
+        intersection_size = as.numeric(intersection_size),
+        term_size = as.numeric(term_size),
+        group = g
+      )
+  }
+  
+  df[1:min(10, nrow(df)), ]
+}) %>% bind_rows()
+
+# Make group a factor to preserve order
+combined_df$group <- factor(combined_df$group, levels = group_order)
+
+# Reorder term labels by group and p-value
+combined_df <- combined_df %>%
+  mutate(term_label = ifelse(is.na(p_value), "No data", term_name)) %>%
+  arrange(group, desc(p_value)) %>%
+  mutate(term_label = factor(paste(group, term_label, sep = ": "), 
+                             levels = paste(group, term_label, sep = ": ")))
+
+# Plot with colored fills
+p <- ggplot(combined_df, aes(
+      y = term_label,
+      x = -log10(p_value),
+      size = intersection_size / term_size,
+      fill = group
+    )) +
+  geom_point(shape = 21, color = "grey30") +  # color = border, fill = group
+  scale_fill_manual(values = group_colors) +
+  theme_minimal() +
+  labs(
+    x = "-log10(adj.p-value)",
+    y = "Biological Processes",
+    size = "Gene Ratio",
+    fill = "Group"
+  ) +
+  ggtitle("MDD genetically associated genes among DEGs") +
+  theme(
+    axis.text.y = element_text(size = 10),
+    legend.position = "right"
+  )
+
+cowplot::plot_grid(p, ncol = 1)
+
+```
+
+
+```{r, fig.width=8, fig.height=6}
+library(tidyverse)
+library(cowplot)
+
+# Desired order
+group_order <- c("NSC", "INP", "NB", "YGN", "GN")
+
+# Assign custom colors
+group_colors <- c("NSC" = "#FC8D62", 
+                  "INP" = "#E78AC3", 
+                  "NB"  = "#8DA0CB", 
+                  "YGN" = "#A6D854", 
+                  "GN"  = "#66C2A5")
+
+# Prepare a combined dataframe
+combined_df <- lapply(group_order, function(g) {
+  df <- go_list[[g]]
+  
+  if (is.null(df) || nrow(df) == 0) {
+    df <- tibble(
+      term_name = "No data",
+      p_value = NA,
+      intersection_size = NA,
+      term_size = NA,
+      group = g
+    )
+  } else {
+    df <- df %>%
+      mutate(
+        p_value = as.numeric(p_value),
+        intersection_size = as.numeric(intersection_size),
+        term_size = as.numeric(term_size),
+        group = g
+      )
+  }
+  
+  df[1:min(10, nrow(df)), ]
+}) %>% bind_rows()
+
+# Make group a factor to preserve order
+combined_df$group <- factor(combined_df$group, levels = group_order)
+
+# Reorder term labels by group and p-value
+combined_df <- combined_df %>%
+  mutate(term_label = ifelse(is.na(p_value), "No data", term_name)) %>%
+  arrange(group, desc(p_value)) %>%
+  mutate(term_label = factor(paste(group, term_label, sep = ": "), 
+                             levels = paste(group, term_label, sep = ": ")))
+
+# Plot with flipped axes and tilted x-axis labels
+p <- ggplot(combined_df, aes(
+      x = term_label,
+      y = -log10(p_value),
+      size = intersection_size / term_size,
+      fill = group
+    )) +
+  geom_point(shape = 21, color = "grey30") +
+  scale_fill_manual(values = group_colors) +
+  theme_minimal() +
+  labs(
+    x = "Biological Processes",
+    y = "-log10(adj.p-value)",
+    size = "Gene Ratio",
+    fill = "Group"
+  ) +
+  ggtitle("MDD genetically associated genes among DEGs") +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1),  # tilt x-axis labels
+    axis.text.y = element_text(size = 10),
+    legend.position = "right"
+  )
+
+cowplot::plot_grid(p, ncol = 1)
+
+```
+
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("plots/GO_BP_MDD_combined_all_genes.pdf", width = 8, height = 6)  # width & height in inches
+
+cowplot::plot_grid(p, ncol = 1)
+
+# Close PDF device
+dev.off()
+```
+
+# Notes
+```{r}
+sessionInfo()
+```
+

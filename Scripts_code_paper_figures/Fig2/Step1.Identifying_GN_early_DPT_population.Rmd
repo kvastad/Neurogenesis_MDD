@@ -1,0 +1,581 @@
+---
+title: "Step1.Identifying_GN_early_DPT_population"
+output: 
+  rmarkdown::html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: readable
+vignette: >
+  %\VignetteIndexEntry{My Standalone Vignette}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+---
+
+
+# Load libraries
+```{r, message=FALSE}
+library(Seurat)
+library(dplyr)
+library(destiny)
+library(ggplot2)
+library(readr)
+library(gprofiler2)
+```
+
+
+# Load data
+```{r}
+seurat_obj <- readRDS(file = "seurat_objects/Postnatal_human_seurat_v5.rds")
+
+seurat_obj
+head(seurat_obj[[]])
+```
+
+
+Update metadata
+```{r}
+seurat_obj$cell_anno <- gsub("^Postnatal_human_", "", seurat_obj$cell_anno)
+
+table(seurat_obj$cell_anno)
+```
+
+
+
+Check distribution of gene with low number of UMIs
+```{r, warning=FALSE}
+gene_umi_totals <- rowSums(GetAssayData(seurat_obj, assay = "RNA", slot = "counts"))
+```
+
+
+Plot
+```{r}
+hist(gene_umi_totals[gene_umi_totals <= 100],
+     breaks = seq(0, 100, by = 10),
+     main = "Genes with 1–100 UMIs",
+     xlab = "Total UMIs per gene")
+```
+
+
+
+
+Filter out low abundance genes.
+```{r}
+# Define a threshold for the total UMI count
+min_umi <- 10
+
+# Calculate the total UMIs per gene
+gene_totals_seurat_obj <- Matrix::rowSums(GetAssayData(seurat_obj, layer = "counts"))
+
+# Subset genes with total UMIs above the threshold
+seurat_obj
+seurat_obj <- subset(seurat_obj, features = rownames(seurat_obj)[gene_totals_seurat_obj >= min_umi])
+seurat_obj
+```
+
+
+
+
+```{r}
+# Subset only the lineage cells
+lineage_cells <- subset(seurat_obj, subset = cell_anno %in% c("GN"))
+
+table(lineage_cells$cell_anno)
+```
+
+
+# tSNE
+
+```{r}
+# 1. Normalize data
+lineage_cells <- NormalizeData(lineage_cells)
+
+# 2. Find variable features
+lineage_cells <- FindVariableFeatures(lineage_cells)
+
+# 3. Scale data
+lineage_cells <- ScaleData(lineage_cells)
+
+# 4. Run PCA
+lineage_cells <- RunPCA(lineage_cells)
+
+# 5. Elbow plot to help choose number of PCs
+ElbowPlot(lineage_cells, ndims = 50)  # plots variance explained by top 50 PCs
+
+# 6. Find neighbors using selected PCs (e.g., top 20)
+lineage_cells <- FindNeighbors(lineage_cells, dims = 1:20)
+
+# 7. Run clustering
+lineage_cells <- FindClusters(lineage_cells, resolution = 0.2)  # adjust resolution as needed
+
+```
+
+
+
+```{r}
+# Run t-SNE using the first 20 PCs
+set.seed(123)
+lineage_cells <- RunTSNE(lineage_cells, dims = 1:20)
+
+# Plot t-SNE colored by seurat_clusters and samples
+DimPlot(lineage_cells, reduction = "tsne", group.by = "seurat_clusters", label = TRUE)
+DimPlot(lineage_cells, reduction = "tsne", group.by = "orig.ident", label = TRUE)
+```
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("harmony/tSNE_seurat_clusters_before_harmony.pdf", width = 8, height = 6)  # width & height in inches
+
+DimPlot(lineage_cells, reduction = "tsne", group.by = "seurat_clusters", label = TRUE)
+
+# Close PDF device
+dev.off()
+```
+
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("harmony/tSNE_samples_before_harmony.pdf", width = 8, height = 6)  # width & height in inches
+
+DimPlot(lineage_cells, reduction = "tsne", group.by = "orig.ident", label = TRUE)
+
+# Close PDF device
+dev.off()
+```
+
+
+```{r}
+library(harmony)
+
+# Run Harmony
+lineage_cells <- RunHarmony(
+  lineage_cells,             # Seurat object
+  group.by.vars = "orig.ident",  # batch variable to regress out
+  dims.use = 1:50             # PCA dimensions to harmonize
+)
+```
+
+
+
+Calculate a tSNE plot.
+```{r}
+# Run t-SNE using the first 20 PCs
+set.seed(123)
+lineage_cells <- RunTSNE(lineage_cells, dims = 1:20, reduction = "harmony")
+
+# Plot t-SNE colored by seurat_clusters and samples
+DimPlot(lineage_cells, reduction = "tsne", group.by = "seurat_clusters", label = TRUE)
+DimPlot(lineage_cells, reduction = "tsne", group.by = "orig.ident", label = TRUE)
+```
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("harmony/tSNE_seurat_clusters_after_harmony.pdf", width = 8, height = 6)  # width & height in inches
+
+DimPlot(lineage_cells, reduction = "tsne", group.by = "seurat_clusters", label = TRUE)
+
+# Close PDF device
+dev.off()
+```
+
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("harmony/tSNE_samples_after_harmony.pdf", width = 8, height = 6)  # width & height in inches
+
+DimPlot(lineage_cells, reduction = "tsne", group.by = "orig.ident", label = TRUE)
+
+# Close PDF device
+dev.off()
+```
+
+
+
+
+# diffusion map and pseudotime
+
+```{r}
+
+pcs <- Embeddings(lineage_cells, "harmony")[, 1:50]  # cells × PCs
+
+# Run diffusion map
+dm <- DiffusionMap(pcs)  # transpose: cells × PCs
+
+# Compute pseudotime (DPT)
+dpt <- DPT(dm)
+
+# Assign to Seurat metadata
+dpt_named <- setNames(dpt$DPT1, colnames(dm@transitions))
+lineage_cells$DPT <- NA
+lineage_cells$DPT[Cells(lineage_cells)] <- dpt_named[Cells(lineage_cells)]
+
+```
+
+
+Check diffusion pseudotime (DPT) distribution, using destiny, sometime the time order is reversed. 
+```{r}
+aggregate(DPT ~ seurat_clusters, data = lineage_cells[[]], summary)
+```
+
+
+```{r}
+df <- data.frame(
+  tSNE1 = Embeddings(lineage_cells, "tsne")[,1],
+  tSNE2 = Embeddings(lineage_cells, "tsne")[,2],
+  pseudotime_DPT = lineage_cells$DPT
+)
+
+p <- ggplot(df, aes(x = tSNE1, y = tSNE2, color = pseudotime_DPT)) +
+  geom_point(size = 1) +
+  scale_color_viridis_c(option = "B") +
+  theme_classic() +
+  ggtitle("tSNE colored by diffusion pseudotime")
+
+p
+```
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("harmony/tSNE_DPT_after_harmony.pdf", width = 8, height = 6)  # width & height in inches
+
+p
+
+# Close PDF device
+dev.off()
+```
+
+
+
+Plot: one younger and one older population?
+```{r}
+hist(lineage_cells$DPT,
+     breaks = seq(0, 12, by = 0.1),
+     main = "Pseudotime bined",
+     xlab = "Pseudotime")
+
+abline(v = 4, col = "red", lwd = 2, lty = 2)
+```
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("harmony/histogram_DPT_outlier_after_harmony.pdf", width = 8, height = 5)  # width & height in inches
+
+hist(lineage_cells$DPT,
+     breaks = seq(0, 12, by = 0.1),
+     main = "Pseudotime bined",
+     xlab = "Pseudotime")
+
+abline(v = 4, col = "red", lwd = 2, lty = 2)
+
+
+# Close PDF device
+dev.off()
+```
+
+
+
+```{r}
+# Define a cutoff for pseudotime across all cells
+cutoff <- 4  # replace with the DPT value you consider "too high"
+
+# Flag cells above the cutoff
+high_dpt_cells <- WhichCells(lineage_cells, expression = DPT > cutoff)
+
+# Add a new metadata column
+lineage_cells$DPT_outlier <- ifelse(Cells(lineage_cells) %in% high_dpt_cells, "outlier", "normal")
+table(lineage_cells$DPT_outlier)
+
+# Prepare dataframe for ggplot
+df <- data.frame(
+  tSNE1 = Embeddings(lineage_cells, "tsne")[,1],
+  tSNE2 = Embeddings(lineage_cells, "tsne")[,2],
+  pseudotime_DPT = lineage_cells$DPT,
+  is_outlier = lineage_cells$DPT_outlier == "outlier"
+)
+
+# Plot, graying out outliers
+p <- ggplot(df, aes(x = tSNE1, y = tSNE2)) +
+  geom_point(data = subset(df, is_outlier), color = "grey80", size = 1) +
+  geom_point(data = subset(df, !is_outlier), aes(color = pseudotime_DPT), size = 1) +
+  scale_color_viridis_c(option = "B") +
+  theme_classic() +
+  ggtitle("tSNE colored by pseudotime (outliers grayed out)")
+
+p
+```
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("harmony/tSNE_DPT_outliers_after_harmony.pdf", width = 8, height = 6)  # width & height in inches
+
+p
+
+# Close PDF device
+dev.off()
+```
+
+
+
+# Subsampling
+
+Reload original unfiltered data
+```{r}
+seurat_obj <- readRDS(file = "seurat_objects/Postnatal_human_seurat_v5.rds")
+
+seurat_obj
+head(seurat_obj[[]])
+```
+
+
+
+
+Update metadata
+```{r}
+seurat_obj$cell_anno <- gsub("^Postnatal_human_", "", seurat_obj$cell_anno)
+
+table(seurat_obj$cell_anno)
+```
+
+
+
+Early GN DPT < 4 and late GN DPT > 4.
+```{r}
+meta <- lineage_cells@meta.data
+meta$cell <- rownames(meta)
+
+early_meta <- meta %>% 
+  dplyr::filter(DPT < 4)
+
+late_meta <- meta %>% 
+  dplyr::filter(DPT >= 4)
+
+
+nrow(lineage_cells)
+nrow(early_meta)
+nrow(late_meta)
+
+
+#Randomly sample up to 300 barcodes per group
+set.seed(123) # reproducibility
+
+early_barcodes <- sample(
+  early_meta$cell,
+  size = min(300, nrow(early_meta))
+)
+
+late_barcodes <- sample(
+  late_meta$cell,
+  size = min(300, nrow(late_meta))
+)
+
+#should be zero
+intersect(early_barcodes, late_barcodes)
+
+early_GN <- subset(seurat_obj, cells = early_barcodes)
+late_GN  <- subset(seurat_obj, cells = late_barcodes)
+
+early_GN
+late_GN
+```
+
+Update metadata
+```{r}
+# Copy metadata
+meta <- early_GN@meta.data
+
+# Replace "GN" with "early_GN" in the cell_anno column
+meta$cell_anno <- ifelse(meta$cell_anno == "GN", "early_GN", meta$cell_anno)
+
+# Assign updated metadata back to the Seurat object
+early_GN@meta.data <- meta
+
+# Check result
+table(early_GN$cell_anno)
+```
+
+
+
+```{r}
+# Copy metadata
+meta <- late_GN@meta.data
+
+# Replace "GN" with "late_GN" in the cell_anno column
+meta$cell_anno <- ifelse(meta$cell_anno == "GN", "late_GN", meta$cell_anno)
+
+# Assign updated metadata back to the Seurat object
+late_GN@meta.data <- meta
+
+# Check result
+table(late_GN$cell_anno)
+```
+
+
+```{r}
+# Subset to only the other lineage cells
+seurat_obj_sub <- subset(seurat_obj, subset = cell_anno %in% c("NSC","INP","NB","YGN"))
+
+seurat_obj_sub
+table(seurat_obj_sub$cell_anno)
+```
+
+
+# Combining
+
+```{r}
+# Merge the two Seurat objects
+combined_obj_GNxEarly <- merge(
+  x = seurat_obj_sub,
+  y = early_GN
+)
+
+# Check result
+combined_obj_GNxEarly
+table(combined_obj_GNxEarly$cell_anno)
+
+#Join counts layers into one
+combined_obj_GNxEarly <- JoinLayers(combined_obj_GNxEarly)
+
+# Check result
+combined_obj_GNxEarly
+table(combined_obj_GNxEarly$cell_anno)
+```
+
+Save
+```{r, eval=T}
+saveRDS(combined_obj_GNxEarly, file="seurat_objects_harmony/Postnatal_human_seurat_v5_GNxEarly.rds")
+```
+
+
+```{r}
+# Merge the two Seurat objects
+combined_obj_GNxEarlyxLate <- merge(
+  x = combined_obj_GNxEarly,
+  y = late_GN
+)
+
+# Check result
+combined_obj_GNxEarlyxLate
+table(combined_obj_GNxEarlyxLate$cell_anno)
+
+#Join counts layers into one
+combined_obj_GNxEarlyxLate <- JoinLayers(combined_obj_GNxEarlyxLate)
+
+# Check result
+combined_obj_GNxEarlyxLate
+table(combined_obj_GNxEarlyxLate$cell_anno)
+```
+
+Save
+```{r, eval=T}
+saveRDS(combined_obj_GNxEarlyxLate, file="seurat_objects_harmony/Postnatal_human_seurat_v5_GNxEarlyxLate.rds")
+```
+
+
+Check distribution of gene with low number of UMIs
+```{r}
+gene_umi_totals <- rowSums(GetAssayData(combined_obj_GNxEarly, assay = "RNA", slot = "counts"))
+
+hist(gene_umi_totals[gene_umi_totals <= 100],
+     breaks = seq(0, 100, by = 10),
+     main = "Genes with 1–100 UMIs",
+     xlab = "Total UMIs per gene")
+```
+
+
+Filter out low abundance genes.
+```{r}
+# Define a threshold for the total UMI count
+min_umi <- 10
+
+# Calculate the total UMIs per gene
+gene_totals_combined_obj_GNxEarly <- Matrix::rowSums(GetAssayData(combined_obj_GNxEarly, layer = "counts"))
+
+# Subset genes with total UMIs above the threshold
+combined_obj_GNxEarly
+
+combined_obj_GNxEarly <- subset(combined_obj_GNxEarly, features = rownames(combined_obj_GNxEarly)[gene_totals_combined_obj_GNxEarly >= min_umi])
+combined_obj_GNxEarly
+```
+
+
+```{r}
+Idents(combined_obj_GNxEarly) <- "cell_anno"
+
+VlnPlot(
+  combined_obj_GNxEarly,
+  features = c("nCount_RNA", "nFeature_RNA"),
+  pt.size = 0.1,            # size of points
+  ncol = 2                  # plot side by side
+)
+```
+
+
+Save
+```{r, eval=T}
+saveRDS(combined_obj_GNxEarly, file="seurat_objects_harmony/Postnatal_human_seurat_v5_GNxEarly_filtered.rds")
+```
+
+
+Check distribution of gene with low number of UMIs
+```{r}
+gene_umi_totals <- rowSums(GetAssayData(combined_obj_GNxEarlyxLate, assay = "RNA", slot = "counts"))
+
+hist(gene_umi_totals[gene_umi_totals <= 100],
+     breaks = seq(0, 100, by = 10),
+     main = "Genes with 1–100 UMIs",
+     xlab = "Total UMIs per gene")
+```
+
+
+Filter out low abundance genes.
+```{r}
+# Define a threshold for the total UMI count
+min_umi <- 10
+
+# Calculate the total UMIs per gene
+gene_totals_combined_obj_GNxEarly <- Matrix::rowSums(GetAssayData(combined_obj_GNxEarlyxLate, layer = "counts"))
+
+# Subset genes with total UMIs above the threshold
+combined_obj_GNxEarlyxLate
+
+combined_obj_GNxEarlyxLate <- subset(combined_obj_GNxEarlyxLate, features = rownames(combined_obj_GNxEarlyxLate)[gene_totals_combined_obj_GNxEarly >= min_umi])
+combined_obj_GNxEarlyxLate
+```
+
+
+```{r}
+Idents(combined_obj_GNxEarlyxLate) <- "cell_anno"
+
+VlnPlot(
+  combined_obj_GNxEarlyxLate,
+  features = c("nCount_RNA", "nFeature_RNA"),
+  pt.size = 0.1,            # size of points
+  ncol = 2                  # plot side by side
+)
+```
+
+
+Save
+```{r, eval=T}
+saveRDS(combined_obj_GNxEarlyxLate, file="seurat_objects_harmony/Postnatal_human_seurat_v5_GNxEarlyxLate_filtered.rds")
+```
+
+
+# Notes
+```{r}
+sessionInfo()
+```

@@ -1,0 +1,572 @@
+---
+title: "Step6.DEGs_cell_type_enrichment_MDD_all_genes"
+output: 
+  rmarkdown::html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: readable
+vignette: >
+  %\VignetteIndexEntry{My Standalone Vignette}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+---
+
+Load libraries
+```{r, message=FALSE, warning=FALSE}
+library(Seurat)
+library(SeuratObject)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(viridis)
+library(gprofiler2)
+library(STEAM)
+```
+
+
+Load SC se object:
+```{r}
+se <- readRDS("Seurat_objects/Postnatal_human_seurat_v5_subset_300_filtered_Metacell_SCTransform.rds")
+se
+
+table(se$cell_anno)
+```
+
+Load DEG genes
+```{r}
+DEG_genes <- read_csv2("DEG_output/DE_genes.csv")
+DEG_genes <- as.data.frame(DEG_genes)
+DEG_genes$p_val_adj <- as.numeric(DEG_genes$p_val_adj)
+DEG_genes <- subset(DEG_genes, subset = p_val_adj <= 0.05) # using only significant DEG
+```
+
+
+Load Open Targets gene list
+```{r}
+OpenTargets_MDD_Genetic_ <- as.character(t(read.table(file = "data/OpenTargets/ranked_gene_sets/OT-MONDO_0002009-associated-targets-9_15_2026-v26_06_weights_genetics_only_MDD_ranked.csv")))
+length(OpenTargets_MDD_Genetic_)
+```
+
+
+Filter out genes not present in the Seurat object.
+```{r}
+# Extract gene names from the Seurat object
+gene_names <- rownames(se)
+
+# Remove genes not present in the Seurat object from the gene lists
+OpenTargets_MDD_Genetic_ <- unique(OpenTargets_MDD_Genetic_[OpenTargets_MDD_Genetic_ %in% gene_names])
+length(OpenTargets_MDD_Genetic_)
+```
+
+
+
+Run Fisher's exact test.
+```{r}
+fisher_results <- run_fisher_test_degs(se, DEG_genes = DEG_genes, OT_genes = OpenTargets_MDD_Genetic_)
+fisher_results
+```
+
+
+Plot results.
+```{r, fig.height=10, fig.width=25}
+# Ensure clusters are ordered by significance
+fisher_results$cluster <- factor(fisher_results$cluster, 
+                                 levels = fisher_results$cluster[order(fisher_results$adj_p_value)])
+
+# Create the updated plot with viridis scale
+p2 <- ggplot(fisher_results, aes(x = cluster, color = -log10(p_value), y = -log10(adj_p_value), size = odds_ratio)) +
+  geom_point() +  
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray50") +  
+  scale_color_viridis(option = "D", direction = 1, name = "-log10(p-value)") +  # Use Viridis color scale
+  scale_size_continuous(range = c(2, 8), name = "Odds ratio") +  
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1,size = 14),axis.text.y = element_text(size = 14),axis.title.x = element_text(size = 16, face = "bold"),axis.title.y = element_text(size = 16, face = "bold"),plot.title = element_text(size = 18, face = "bold"),legend.title = element_text(size = 14),legend.text = element_text(size = 12)) +  
+  labs(title = "All MDD genes",
+       x = "Cell types",
+       y = "-log10(adj p-value)") +
+  guides(color = guide_colorbar(order = 1), size = guide_legend(order = 2))
+
+p2
+```
+
+
+# NSC
+
+```{r}
+# Subset DEGs for the cluster of interest
+cluster_NSC <- DEG_genes[DEG_genes$cluster == "NSC", ]
+  
+# Identify genetically associated genes
+cluster_NSC$Genetically_Associated <- cluster_NSC$gene %in% OpenTargets_MDD_Genetic_
+
+# A: Genetically associated & DE
+genetically_associated_DE_genes_NSC <- cluster_NSC[cluster_NSC$Genetically_Associated == TRUE, ]
+
+# Print the genes that are both genetically associated and differentially expressed
+print("Genes that are genetically associated and DE for NSC:")
+print(genetically_associated_DE_genes_NSC$gene)
+
+Genes_NSC <- genetically_associated_DE_genes_NSC$gene
+```
+
+
+Make sure that Genes_NSC is ordered in the order of smallest p_val_adj 
+```{r}
+DEG_genes_NSC <- subset(DEG_genes, cluster == "NSC" )
+
+DEG_genes_NSC <- DEG_genes_NSC %>%
+  arrange(p_val_adj)
+
+Genes_NSC_ordered <- Genes_NSC[order(match(Genes_NSC, DEG_genes_NSC))]
+Genes_NSC_ordered
+length(Genes_NSC_ordered)
+```
+
+
+GO analysis
+```{r}
+gostres <- gost(query = Genes_NSC_ordered, 
+                organism = "hsapiens", ordered_query = TRUE, # Biological processes
+                multi_query = FALSE, significant = T, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = T, 
+                user_threshold = 0.05, correction_method = "g_SCS", 
+                domain_scope = "annotated", custom_bg = NULL, 
+                numeric_ns = "", sources = NULL, as_short_link = FALSE)
+
+```
+
+
+```{r}
+gostplot(gostres, capped = TRUE, interactive = F)
+```
+
+
+```{r}
+results <- gostres$result
+results <- results[grep("GO:BP",results$source), ]
+results <- arrange(results,p_value)
+```
+
+Save GO results
+```{r, eval=T}
+write_delim(results, "DEG_output/GO_analysis/GO_Genes_MDD_all_genes_NSC.csv", delim = ";")
+```
+
+
+```{r}
+
+results_plot <- na.omit(results[1:20,])
+
+p <- ggplot() +
+  geom_point(
+    data = results_plot, 
+    aes(
+      x = reorder(term_name, -log10(p_value)), 
+      y = -log10(p_value),
+      size = intersection_size/term_size  # map size
+    ), 
+    color = "grey50",  # outline color
+    fill = "grey70",   # fill color (uniform)
+    shape = 21
+  ) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    x = "GO:BP", 
+    y = "-log10(adj.p-value)", 
+    size = "GeneRatio"
+  ) +
+  ggtitle("MDD: NSC", subtitle = "Top 20") +
+  guides(fill = "none")  # remove fill legend if still present
+
+cowplot::plot_grid(p, ncol = 1)
+```
+
+
+
+# INP
+
+```{r}
+# Subset DEGs for the cluster of interest
+cluster_INP <- DEG_genes[DEG_genes$cluster == "INP", ]
+  
+# Identify genetically associated genes
+cluster_INP$Genetically_Associated <- cluster_INP$gene %in% OpenTargets_MDD_Genetic_
+
+# A: Genetically associated & DE
+genetically_associated_DE_genes_INP <- cluster_INP[cluster_INP$Genetically_Associated == TRUE, ]
+
+# Print the genes that are both genetically associated and differentially expressed
+print("Genes that are genetically associated and DE for INP:")
+print(genetically_associated_DE_genes_INP$gene)
+
+Genes_INP <- genetically_associated_DE_genes_INP$gene
+```
+
+
+Make sure that Genes_INP is ordered in the order of smallest p_val_adj 
+```{r}
+DEG_genes_INP <- subset(DEG_genes, cluster == "INP" )
+
+DEG_genes_INP <- DEG_genes_INP %>%
+  arrange(p_val_adj)
+
+Genes_INP_ordered <- Genes_INP[order(match(Genes_INP, DEG_genes_INP))]
+Genes_INP_ordered
+length(Genes_INP_ordered)
+```
+
+
+GO analysis
+```{r}
+gostres <- gost(query = Genes_INP_ordered, 
+                organism = "hsapiens", ordered_query = TRUE, # Biological processes
+                multi_query = FALSE, significant = T, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = T, 
+                user_threshold = 0.05, correction_method = "g_SCS", 
+                domain_scope = "annotated", custom_bg = NULL, 
+                numeric_ns = "", sources = NULL, as_short_link = FALSE)
+
+```
+
+
+```{r}
+gostplot(gostres, capped = TRUE, interactive = F)
+```
+
+
+```{r}
+results <- gostres$result
+results <- results[grep("GO:BP",results$source), ]
+results <- arrange(results,p_value)
+```
+
+Save GO results
+```{r, eval=T}
+write_delim(results, "DEG_output/GO_analysis/GO_Genes_MDD_all_genes_INP.csv", delim = ";")
+```
+
+
+```{r}
+
+results_plot <- na.omit(results[1:20,])
+
+p <- ggplot() +
+  geom_point(
+    data = results_plot, 
+    aes(
+      x = reorder(term_name, -log10(p_value)), 
+      y = -log10(p_value),
+      size = intersection_size/term_size  # map size
+    ), 
+    color = "grey50",  # outline color
+    fill = "grey70",   # fill color (uniform)
+    shape = 21
+  ) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    x = "GO:BP", 
+    y = "-log10(adj.p-value)", 
+    size = "GeneRatio"
+  ) +
+  ggtitle("MDD: INP", subtitle = "Top 20") +
+  guides(fill = "none")  # remove fill legend if still present
+
+cowplot::plot_grid(p, ncol = 1)
+```
+
+
+
+# NB
+
+```{r}
+# Subset DEGs for the cluster of interest
+cluster_NB <- DEG_genes[DEG_genes$cluster == "NB", ]
+  
+# Identify genetically associated genes
+cluster_NB$Genetically_Associated <- cluster_NB$gene %in% OpenTargets_MDD_Genetic_
+
+# A: Genetically associated & DE
+genetically_associated_DE_genes_NB <- cluster_NB[cluster_NB$Genetically_Associated == TRUE, ]
+
+# Print the genes that are both genetically associated and differentially expressed
+print("Genes that are genetically associated and DE for NB:")
+print(genetically_associated_DE_genes_NB$gene)
+
+Genes_NB <- genetically_associated_DE_genes_NB$gene
+```
+
+
+Make sure that Genes_NB is ordered in the order of smallest p_val_adj 
+```{r}
+DEG_genes_NB <- subset(DEG_genes, cluster == "NB" )
+
+DEG_genes_NB <- DEG_genes_NB %>%
+  arrange(p_val_adj)
+
+Genes_NB_ordered <- Genes_NB[order(match(Genes_NB, DEG_genes_NB))]
+Genes_NB_ordered
+length(Genes_NB_ordered)
+```
+
+
+GO analysis
+```{r}
+gostres <- gost(query = Genes_NB_ordered, 
+                organism = "hsapiens", ordered_query = TRUE, # Biological processes
+                multi_query = FALSE, significant = T, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = T, 
+                user_threshold = 0.05, correction_method = "g_SCS", 
+                domain_scope = "annotated", custom_bg = NULL, 
+                numeric_ns = "", sources = NULL, as_short_link = FALSE)
+
+```
+
+
+```{r}
+gostplot(gostres, capped = TRUE, interactive = F)
+```
+
+
+```{r}
+results <- gostres$result
+results <- results[grep("GO:BP",results$source), ]
+results <- arrange(results,p_value)
+```
+
+Save GO results
+```{r, eval=T}
+write_delim(results, "DEG_output/GO_analysis/GO_Genes_MDD_all_genes_NB.csv", delim = ";")
+```
+
+
+```{r}
+
+results_plot <- na.omit(results[1:20,])
+
+p <- ggplot() +
+  geom_point(
+    data = results_plot, 
+    aes(
+      x = reorder(term_name, -log10(p_value)), 
+      y = -log10(p_value),
+      size = intersection_size/term_size  # map size
+    ), 
+    color = "grey50",  # outline color
+    fill = "grey70",   # fill color (uniform)
+    shape = 21
+  ) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    x = "GO:BP", 
+    y = "-log10(adj.p-value)", 
+    size = "GeneRatio"
+  ) +
+  ggtitle("MDD: NB", subtitle = "Top 20") +
+  guides(fill = "none")  # remove fill legend if still present
+
+cowplot::plot_grid(p, ncol = 1)
+```
+
+
+# YGN
+
+```{r}
+# Subset DEGs for the cluster of interest
+cluster_YGN <- DEG_genes[DEG_genes$cluster == "YGN", ]
+  
+# Identify genetically associated genes
+cluster_YGN$Genetically_Associated <- cluster_YGN$gene %in% OpenTargets_MDD_Genetic_
+
+# A: Genetically associated & DE
+genetically_associated_DE_genes_YGN <- cluster_YGN[cluster_YGN$Genetically_Associated == TRUE, ]
+
+# Print the genes that are both genetically associated and differentially expressed
+print("Genes that are genetically associated and DE for YGN:")
+print(genetically_associated_DE_genes_YGN$gene)
+
+Genes_YGN <- genetically_associated_DE_genes_YGN$gene
+```
+
+
+Make sure that Genes_YGN is ordered in the order of smallest p_val_adj 
+```{r}
+DEG_genes_YGN <- subset(DEG_genes, cluster == "YGN" )
+
+DEG_genes_YGN <- DEG_genes_YGN %>%
+  arrange(p_val_adj)
+
+Genes_YGN_ordered <- Genes_YGN[order(match(Genes_YGN, DEG_genes_YGN))]
+Genes_YGN_ordered
+length(Genes_YGN_ordered)
+```
+
+
+GO analysis
+```{r}
+gostres <- gost(query = Genes_YGN_ordered, 
+                organism = "hsapiens", ordered_query = TRUE, # Biological processes
+                multi_query = FALSE, significant = T, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = T, 
+                user_threshold = 0.05, correction_method = "g_SCS", 
+                domain_scope = "annotated", custom_bg = NULL, 
+                numeric_ns = "", sources = NULL, as_short_link = FALSE)
+
+```
+
+
+```{r}
+gostplot(gostres, capped = TRUE, interactive = F)
+```
+
+
+```{r}
+results <- gostres$result
+results <- results[grep("GO:BP",results$source), ]
+results <- arrange(results,p_value)
+```
+
+Save GO results
+```{r, eval=T}
+write_delim(results, "DEG_output/GO_analysis/GO_Genes_MDD_all_genes_YGN.csv", delim = ";")
+```
+
+
+```{r}
+
+results_plot <- na.omit(results[1:20,])
+
+p <- ggplot() +
+  geom_point(
+    data = results_plot, 
+    aes(
+      x = reorder(term_name, -log10(p_value)), 
+      y = -log10(p_value),
+      size = intersection_size/term_size  # map size
+    ), 
+    color = "grey50",  # outline color
+    fill = "grey70",   # fill color (uniform)
+    shape = 21
+  ) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    x = "GO:BP", 
+    y = "-log10(adj.p-value)", 
+    size = "GeneRatio"
+  ) +
+  ggtitle("MDD: YGN", subtitle = "Top 20") +
+  guides(fill = "none")  # remove fill legend if still present
+
+cowplot::plot_grid(p, ncol = 1)
+```
+
+
+
+
+# GN
+
+```{r}
+# Subset DEGs for the cluster of interest
+cluster_GN <- DEG_genes[DEG_genes$cluster == "GN", ]
+  
+# Identify genetically associated genes
+cluster_GN$Genetically_Associated <- cluster_GN$gene %in% OpenTargets_MDD_Genetic_
+
+# A: Genetically associated & DE
+genetically_associated_DE_genes_GN <- cluster_GN[cluster_GN$Genetically_Associated == TRUE, ]
+
+# Print the genes that are both genetically associated and differentially expressed
+print("Genes that are genetically associated and DE for GN:")
+print(genetically_associated_DE_genes_GN$gene)
+
+Genes_GN <- genetically_associated_DE_genes_GN$gene
+```
+
+
+Make sure that Genes_GN is ordered in the order of smallest p_val_adj 
+```{r}
+DEG_genes_GN <- subset(DEG_genes, cluster == "GN" )
+
+DEG_genes_GN <- DEG_genes_GN %>%
+  arrange(p_val_adj)
+
+Genes_GN_ordered <- Genes_GN[order(match(Genes_GN, DEG_genes_GN))]
+Genes_GN_ordered
+length(Genes_GN_ordered)
+```
+
+
+GO analysis
+```{r}
+gostres <- gost(query = Genes_GN_ordered, 
+                organism = "hsapiens", ordered_query = TRUE, # Biological processes
+                multi_query = FALSE, significant = T, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = T, 
+                user_threshold = 0.05, correction_method = "g_SCS", 
+                domain_scope = "annotated", custom_bg = NULL, 
+                numeric_ns = "", sources = NULL, as_short_link = FALSE)
+
+```
+
+
+```{r}
+gostplot(gostres, capped = TRUE, interactive = F)
+```
+
+
+```{r}
+results <- gostres$result
+results <- results[grep("GO:BP",results$source), ]
+results <- arrange(results,p_value)
+```
+
+Save GO results
+```{r, eval=T}
+write_delim(results, "DEG_output/GO_analysis/GO_Genes_MDD_all_genes_GN.csv", delim = ";")
+```
+
+
+```{r}
+
+results_plot <- na.omit(results[1:20,])
+
+p <- ggplot() +
+  geom_point(
+    data = results_plot, 
+    aes(
+      x = reorder(term_name, -log10(p_value)), 
+      y = -log10(p_value),
+      size = intersection_size/term_size  # map size
+    ), 
+    color = "grey50",  # outline color
+    fill = "grey70",   # fill color (uniform)
+    shape = 21
+  ) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    x = "GO:BP", 
+    y = "-log10(adj.p-value)", 
+    size = "GeneRatio"
+  ) +
+  ggtitle("MDD: GN", subtitle = "Top 20") +
+  guides(fill = "none")  # remove fill legend if still present
+
+cowplot::plot_grid(p, ncol = 1)
+```
+
+
+
+
+
+
+# Notes
+```{r}
+sessionInfo()
+```
+

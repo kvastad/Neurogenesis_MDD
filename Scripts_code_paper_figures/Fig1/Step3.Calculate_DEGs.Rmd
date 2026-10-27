@@ -1,0 +1,107 @@
+---
+title: "Step4.Calculate_DEGs"
+output: 
+  rmarkdown::html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: readable
+vignette: >
+  %\VignetteIndexEntry{My Standalone Vignette}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+---
+
+Load libraries
+```{r, warning=FALSE, message=FALSE}
+library(Seurat)
+library(SeuratObject)
+library(dplyr)
+```
+
+
+Load SC se object:
+```{r}
+se <- readRDS("Seurat_objects/Postnatal_human_seurat_v5_subset_300_filtered_Metacell_SCTransform.rds")
+se
+table(se$cell_anno)
+```
+
+
+Collect QC metrics
+```{r}
+se[["percent.mt"]] <- PercentageFeatureSet(se, pattern = "^MT-")
+se[["percent.rb"]] <- PercentageFeatureSet(se, pattern = "^RPL|^RPS")
+```
+
+
+Plot QC metrics
+```{r, fig.width=10, fig.height=20, warning=FALSE}
+VlnPlot(se, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rb"), ncol = 1, group.by = "cell_anno")
+```
+
+
+```{r, fig.width=10, fig.height=20}
+RidgePlot(se, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rb"), ncol = 1, group.by = "cell_anno")
+```
+
+
+DE analysis, for all clusters
+```{r}
+se
+DefaultAssay(se) <- "RNA"
+se
+
+#se <- JoinLayers(se)
+#se
+
+se <- se %>%
+  NormalizeData()
+
+se <- SetIdent(se, value = "cell_anno")
+N.markers <- FindAllMarkers(se, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25,slot = "data")
+```
+
+
+Save N.markers
+```{r, eval=T}
+write.table(N.markers,file="DEG_output/DE_genes.csv", col.names = T, row.names = F,quote = FALSE,sep = ";")
+```
+
+
+Select top N genes to plot
+```{r}
+N <- 10
+
+topN <- N.markers %>% 
+            group_by(cluster) %>% 
+            arrange(cluster,p_val_adj) %>%
+            slice_head(n=N)
+topN
+```
+
+
+Plot heat map of top N genes in each cluster:
+```{r, fig.height=20, fig.width=13}
+se <- ScaleData(se) 
+DoHeatmap(se, features = topN$gene)
+```
+
+
+
+PDF
+```{r, eval=T}
+pdf(file = "DEG_output/DEG_Heatmap_top10.pdf", height = 20, width = 13)
+
+DoHeatmap(se, features = topN$gene)
+
+dev.off()
+```
+
+
+SessionInfo
+```{r}
+sessionInfo()
+```
+

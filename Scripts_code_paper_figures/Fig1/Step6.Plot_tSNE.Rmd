@@ -1,0 +1,360 @@
+---
+title: "Plot_UMAP_tSNE"
+output: 
+  rmarkdown::html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: readable
+vignette: >
+  %\VignetteIndexEntry{My Standalone Vignette}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+Load libraries
+```{r, message=FALSE}
+library(Seurat)
+library(dplyr)
+library(readr)
+library(ggplot2)
+```
+
+
+Load data
+```{r}
+seurat_obj <- readRDS(file = "seurat_objects/Postnatal_human_seurat_v5_subset_300_filtered.rds")
+
+seurat_obj
+head(seurat_obj)
+table(seurat_obj$cell_anno)
+```
+
+
+
+
+```{r}
+metadata <- read_csv2(file = "DEG_output/Fishers_exact_test_MDD_top.csv")
+```
+
+
+Add p-values to the seurat objects metadata.
+```{r}
+
+# Convert character columns to numeric first (important)
+metadata <- metadata %>%
+  mutate(
+    p_value = as.numeric(p_value),
+    adj_p_value = as.numeric(adj_p_value)
+  )
+
+# Extract the current metadata
+seurat_meta <- seurat_obj@meta.data
+
+# Add only the new columns by joining on cell type
+new_cols <- seurat_meta %>%
+  left_join(
+    metadata %>% dplyr::select(cluster, p_value, adj_p_value),
+    by = c("cell_anno" = "cluster")
+  )
+
+# Update the Seurat object's metadata
+seurat_obj <- AddMetaData(
+  seurat_obj,
+  metadata = new_cols
+)
+
+
+head(seurat_obj[[]])
+```
+
+
+Add two new columns with -log10 transformed values
+```{r}
+# Create a new dataframe with the transformed columns
+new_cols <- data.frame(
+  neglog_pval = -log10(seurat_obj$p_value),
+  neglog_adj_pval = -log10(seurat_obj$adj_p_value),
+  row.names = rownames(seurat_obj@meta.data)
+)
+
+# Add to Seurat metadata
+seurat_obj <- AddMetaData(seurat_obj, metadata = new_cols)
+
+head(seurat_obj[[]])
+```
+
+
+
+```{r}
+cell_colors <- c(
+  "NSC"  = "#FC8D62",
+  "INP"  = "#E78AC3",
+  "NB"   = "#8DA0CB",
+  "YGN"  = "#A6D854",
+  "GN"   = "#66C2A5",
+  "In"   = "#00A9FF",
+  "EXN"  = "#F8766D",
+  "Endo" = "#CD9600",
+  "Epend"= "#C77CFF",
+  "OPC"  = "#00BE67",
+  "Oligo"= "#7CAE00",
+  "Astro"= "#00BFC4",
+  "Immune" = "#FF61CC"
+)
+
+# Reorder the identities to match the order in cell_colors
+#seurat_obj$cell_anno <- factor(seurat_obj$cell_anno, levels = names(cell_colors))
+
+
+Idents(seurat_obj) <- seurat_obj$cell_anno
+
+VlnPlot(
+  seurat_obj,
+  features = c("nCount_RNA", "nFeature_RNA"),
+  pt.size = 0.1,    # size of points
+  ncol = 2,         # plot side by side
+  cols = cell_colors
+)
+
+```
+
+
+
+```{r}
+# 1. Normalize data
+seurat_obj <- NormalizeData(seurat_obj)
+
+# 2. Find variable features
+seurat_obj <- FindVariableFeatures(seurat_obj)
+
+# 3. Scale data
+seurat_obj <- ScaleData(seurat_obj)
+
+# 4. Run PCA
+seurat_obj <- RunPCA(seurat_obj)
+
+# 5. Elbow plot to help choose number of PCs
+ElbowPlot(seurat_obj, ndims = 50)  # plots variance explained by top 50 PCs
+
+```
+
+
+```{r}
+# Run t-SNE using the first 20 PCs
+set.seed(123)
+seurat_obj <- RunTSNE(seurat_obj, dims = 1:30)
+
+# Plot t-SNE colored by cell_anno
+DimPlot(seurat_obj, reduction = "tsne", group.by = "cell_anno", label = TRUE, cols = cell_colors)
+```
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("plots/tSNE_cell_anno.pdf", width = 8, height = 6)  # width & height in inches
+
+# Plot your Seurat plot
+DimPlot(seurat_obj, reduction = "tsne", group.by = "cell_anno", label = TRUE, cols = cell_colors)
+
+# Close PDF device
+dev.off()
+```
+
+
+```{r}
+# Plot t-SNE colored by orig.ident
+DimPlot(seurat_obj, reduction = "tsne", group.by = "orig.ident", label = TRUE)
+```
+
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("plots/tSNE_samples.pdf", width = 8, height = 6)  # width & height in inches
+
+# Plot your Seurat plot
+DimPlot(seurat_obj, reduction = "tsne", group.by = "orig.ident", label = TRUE)
+
+# Close PDF device
+dev.off()
+```
+
+
+```{r}
+DimPlot(seurat_obj, group.by = "cell_anno", label = TRUE, reduction = "tsne", label.box = T, cols = cell_colors)
+```
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("plots/tSNE_cell_anno_labelbox.pdf", width = 8, height = 6)  # width & height in inches
+
+# Plot your Seurat plot
+DimPlot(seurat_obj, reduction = "tsne", group.by = "cell_anno", label = TRUE, label.box = T, cols = cell_colors)
+
+# Close PDF device
+dev.off()
+```
+
+
+```{r}
+FeaturePlot(seurat_obj, features = "neglog_adj_pval", reduction = "tsne") +
+  scale_color_viridis_c(option = "viridis") +
+  theme_classic() +
+  theme(
+    axis.title = element_text(size = 14, color = "black"),  # x and y axis titles
+    axis.text = element_text(size = 12, color = "black")                  # x and y axis tick labels
+  )
+
+
+```
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("plots/tSNE_neglog_adj_pval.pdf", width = 8, height = 6)  # width & height in inches
+
+FeaturePlot(seurat_obj, features = "neglog_adj_pval", reduction = "tsne") +
+  scale_color_viridis_c(option = "viridis") +
+  theme_classic() +
+  theme(
+    axis.title = element_text(size = 14, color = "black"),  # x and y axis titles
+    axis.text = element_text(size = 12, color = "black")                  # x and y axis tick labels
+  )
+
+# Close PDF device
+dev.off()
+```
+
+
+
+
+```{r}
+library(harmony)
+
+# Run Harmony
+seurat_obj <- RunHarmony(
+  seurat_obj,             # Seurat object
+  group.by.vars = "orig.ident",  # batch variable to regress out
+  dims.use = 1:50             # PCA dimensions to harmonize
+)
+
+ElbowPlot(seurat_obj, ndims = 50, reduction = "harmony")
+```
+
+
+```{r}
+# Run t-SNE using the first 20 PCs
+set.seed(123)
+seurat_obj <- RunTSNE(seurat_obj, dims = 1:30, reduction = "harmony")
+
+# Plot t-SNE colored by cell_anno
+DimPlot(seurat_obj, reduction = "tsne", group.by = "cell_anno", label = TRUE, cols = cell_colors)
+```
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("plots/tSNE_cell_anno_harmony.pdf", width = 8, height = 6)  # width & height in inches
+
+# Plot your Seurat plot
+DimPlot(seurat_obj, reduction = "tsne", group.by = "cell_anno", label = TRUE, cols = cell_colors)
+
+# Close PDF device
+dev.off()
+```
+
+
+```{r}
+# Plot t-SNE colored by orig.ident
+DimPlot(seurat_obj, reduction = "tsne", group.by = "orig.ident", label = TRUE)
+```
+
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("plots/tSNE_samples_harmony.pdf", width = 8, height = 6)  # width & height in inches
+
+# Plot your Seurat plot
+DimPlot(seurat_obj, reduction = "tsne", group.by = "orig.ident", label = TRUE)
+
+# Close PDF device
+dev.off()
+```
+
+
+
+
+```{r}
+DimPlot(seurat_obj, group.by = "cell_anno", label = TRUE, reduction = "tsne", label.box = T, cols = cell_colors)
+```
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("plots/tSNE_cell_anno_labelbox_harmony.pdf", width = 8, height = 6)  # width & height in inches
+
+# Plot your Seurat plot
+DimPlot(seurat_obj, reduction = "tsne", group.by = "cell_anno", label = TRUE, label.box = T, cols = cell_colors)
+
+# Close PDF device
+dev.off()
+```
+
+
+```{r}
+FeaturePlot(seurat_obj, features = "neglog_adj_pval", reduction = "tsne") +
+  scale_color_viridis_c(option = "viridis") +
+  theme_classic() +
+  theme(
+    axis.title = element_text(size = 14, color = "black"),  # x and y axis titles
+    axis.text = element_text(size = 12, color = "black")                  # x and y axis tick labels
+  )
+
+
+```
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("plots/tSNE_neglog_adj_pval_harmony.pdf", width = 8, height = 6)  # width & height in inches
+
+FeaturePlot(seurat_obj, features = "neglog_adj_pval", reduction = "tsne") +
+  scale_color_viridis_c(option = "viridis") +
+  theme_classic() +
+  theme(
+    axis.title = element_text(size = 14, color = "black"),  # x and y axis titles
+    axis.text = element_text(size = 12, color = "black")                  # x and y axis tick labels
+  )
+
+# Close PDF device
+dev.off()
+```
+
+
+Save Seurat object
+```{r}
+saveRDS(seurat_obj, file = "seurat_objects/Postnatal_human_seurat_v5_subset_300_filtered_harmony.rds")
+```
+
+
+
+
+<details>
+  <summary>Click to show Session Info</summary>
+
+```{r}
+sessionInfo()
+```
+
+</details>

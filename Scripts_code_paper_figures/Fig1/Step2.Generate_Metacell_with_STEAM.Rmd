@@ -1,0 +1,203 @@
+---
+title: "Step2.Generate_Metacell_with_STEAM"
+output: 
+  rmarkdown::html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: readable
+vignette: >
+  %\VignetteIndexEntry{My Standalone Vignette}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+---
+
+
+
+# Load libraries
+
+Load the necessary libraries.
+```{r, message=FALSE, warning=FALSE}
+library(Seurat)
+library(SeuratObject)
+library(dplyr)
+library(STEAM)
+library(future)
+library(ggplot2)
+```
+
+
+# Load data
+
+Load Seurat objecs.
+```{r}
+se <- readRDS("Seurat_objects/Postnatal_human_seurat_v5_subset_300.rds")
+se
+head(se[[]])
+```
+
+
+Check number of cell per cell type of the cluster annotation you want to create MetaCells from.
+```{r}
+table(se$cell_anno)
+```
+
+
+Update metadata
+```{r}
+se$cell_anno <- gsub("^Postnatal_human_", "", se$cell_anno)
+
+table(se$cell_anno)
+```
+
+
+Check number of cell per cell type of the cluster annotation you want to create MetaCells from.
+```{r}
+table(se$cell_anno)
+```
+
+
+Check distribution of gene with low number of UMIs
+```{r}
+gene_umi_totals <- rowSums(GetAssayData(se, assay = "RNA", slot = "counts"))
+```
+
+Plot
+```{r}
+hist(gene_umi_totals[gene_umi_totals <= 100],
+     breaks = seq(0, 100, by = 10),
+     main = "Genes with 1–100 UMIs",
+     xlab = "Total UMIs per gene")
+```
+
+
+
+Filter out low abundance genes.
+```{r}
+# Define a threshold for the total UMI count
+min_umi <- 10
+
+# Calculate the total UMIs per gene
+gene_totals_seurat_obj <- Matrix::rowSums(GetAssayData(se, layer = "counts"))
+
+# Subset genes with total UMIs above the threshold
+se
+se <- subset(se, features = rownames(se)[gene_totals_seurat_obj >= min_umi])
+se
+```
+
+
+
+Check counts
+```{r, warning=FALSE, fig.height=7}
+VlnPlot(se, features = c("nFeature_RNA", "nCount_RNA"), ncol = 1, group.by = "cell_anno")
+```
+
+
+Save
+```{r}
+saveRDS(se, file = "Seurat_objects/Postnatal_human_seurat_v5_subset_300_filtered.rds")
+```
+
+
+
+# Generate MetaCell clusters
+
+
+Here we want to generate MetaCells from the cluster annotation ‘supercluster_term’. The generate_metacell_clusters function subsets all selected clusters into separate Seurat objects and then uses NormalizeData, FindVariableFeatures, ScaleData, RunPCA and FindNeighbors on each and saving them to a list. For each Seurat object in the list the optimal clustering resolution setting is tested by iterating using the FindClusters function, starting at a user given initial resolution (initial_resolution) and moving by 0.1 until the average number of cells per cluster (i.e., the MetaCell) is > 10 (num_cells_per_metacell). The generate_metacell_clusters iterations then reduces the clustering resolution with 0.1 if the average number of cells per cluster (i.e., the MetaCell) is < 10 (num_cells_per_metacell), and then stops.
+
+Please note that if the desired number of average cells per cluster is not possible the reach, the function will stall out. If that happens try using +/- 1 desired number of average cells per cluster and re-run.
+
+```{r, eval=T}
+plan("sequential")
+
+metacells <- generate_metacell_clusters(
+   se = se,
+   cluster_anno = "cell_anno",
+   num_cells_per_metacell = 10,
+   pca_dims = 10,
+   initial_resolution = 0.1
+ )
+
+```
+
+
+Lets sort and investigate the output and look at the distribution of the number of units (spots or cells) per cluster that we will aggregate into MetaCells. Watch out for extremely skewed distributions. If that happens, investigate if other QC filtering settings after subsampling might help.
+
+Sort the MetaCells alphabetically.
+```{r}
+metacells <- sort_metacells(se, metacells, cluster_anno = "cell_anno")
+```
+
+
+Plot the MetaCluster distribution (mean in red, and median in blue).
+```{r}
+plot_metaclusters(metacells, show_mean = T, show_median = T)
+```
+
+
+
+# Aggregate MetaCell clusters
+
+Now, let’s aggregates the expression data across clusters (MetaCells) by summing counts within each cluster of each cell type, and create a MetaCell Seurat object!
+```{r, message=FALSE}
+metacell_seurat <- aggregate_metacells(cell_type_clusters = metacells$metacells, cluster_col = "cell_anno")
+table(metacell_seurat$cell_anno)
+metacell_seurat
+```
+
+
+Check results
+```{r,warning=FALSE, fig.height=7}
+VlnPlot(metacell_seurat, features = c("nFeature_RNA", "nCount_RNA"), ncol = 1, group.by = "cell_anno")
+```
+
+
+
+Save the MetaCell Seurat object for downstream analysis!
+```{r, eval=TRUE}
+saveRDS(metacell_seurat, file = "Seurat_objects/Postnatal_human_seurat_v5_subset_300_filtered_Metacell.rds")
+```
+
+
+```{r}
+head(metacell_seurat[[]])
+```
+
+
+Normalize data with SCTransform.
+```{r, message=FALSE, warning=FALSE, results='hide', , eval=TRUE}
+options(future.globals.maxSize = 4 * 1024^3)
+metacell_seurat
+metacell_seurat <- JoinLayers(metacell_seurat)
+metacell_seurat
+metacell_seurat_normalized <- SCTransform(metacell_seurat,assay = "RNA",return.only.var.genes = T)
+```
+
+
+```{r}
+metacell_seurat_normalized
+```
+
+```{r}
+head(metacell_seurat_normalized[[]])
+```
+
+
+Save the normalized MetaCell Seurat object for downstream analysis!
+```{r, eval=TRUE}
+saveRDS(metacell_seurat_normalized, file = "Seurat_objects/Postnatal_human_seurat_v5_subset_300_filtered_Metacell_SCTransform.rds")
+```
+
+
+
+<details>
+  <summary>Click to show Session Info</summary>
+
+```{r}
+sessionInfo()
+```
+
+</details>
+

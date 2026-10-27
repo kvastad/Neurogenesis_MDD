@@ -1,0 +1,595 @@
+---
+title: "Step2.DEG_OT_fisher_heatmap_stratified_all_genes"
+output: 
+  rmarkdown::html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: readable
+vignette: >
+  %\VignetteIndexEntry{My Standalone Vignette}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+---
+
+
+
+# Load libraries
+
+Load the necessary libraries.
+```{r, message=FALSE, warning=FALSE}
+library(Seurat)
+library(SeuratObject)
+library(dplyr)
+library(MASS)
+library(viridis)
+library(stringr)
+library(patchwork)
+library(ggplot2)
+library(readr)
+library(STEAM)
+library(tidyr)
+library(reshape2)
+library(ggnewscale)
+library(ComplexHeatmap)
+library(circlize)
+```
+
+
+# Load data
+
+
+Fisher exact results.
+```{r}
+ALS_all <- read.table(file = "DEG_output/Fishers_exact_test_ALS_all_genes_stratified.csv", sep = ";", header = T)
+BIP_all <- read.table(file = "DEG_output/Fishers_exact_test_BIP_all_genes_stratified.csv", sep = ";", header = T)
+MDD_all <- read.table(file = "DEG_output/Fishers_exact_test_MDD_all_genes_stratified.csv", sep = ";", header = T)
+PAR_all <- read.table(file = "DEG_output/Fishers_exact_test_PAR_all_genes_stratified.csv", sep = ";", header = T)
+SCZ_all <- read.table(file = "DEG_output/Fishers_exact_test_SCZ_all_genes_stratified.csv", sep = ";", header = T)
+```
+
+
+Add cell type annotations.
+```{r}
+cell_anno <- c(NSC = 2, INP = 3, NB = 3, YGN = 2, GN = 3)
+
+cell_type_vec <- rep(names(cell_anno), times = cell_anno)
+
+MDD_all$cell_type <- cell_type_vec
+ALS_all$cell_type <- cell_type_vec
+BIP_all$cell_type <- cell_type_vec
+PAR_all$cell_type <- cell_type_vec
+SCZ_all$cell_type <- cell_type_vec
+
+```
+
+
+# Build heatmap
+
+
+```{r, fig.height=6, fig.width=10}
+library(ComplexHeatmap)
+library(circlize)
+library(viridisLite)
+library(grid)  # for grid.text and unit
+
+# ---------------------------
+# 1. Combine data
+# ---------------------------
+df_list <- list(
+  BIP = BIP_all,
+  MDD = MDD_all,
+  SCZ = SCZ_all,
+  ALS = ALS_all,
+  PAR = PAR_all
+)
+
+# X-axis ordering based on MDD_all clusters
+clusters <- MDD_all$cluster
+
+# ---------------------------
+# 2. Build log2_OR matrix
+# ---------------------------
+log2_or_mat <- do.call(
+  rbind,
+  lapply(df_list, function(df) {
+    df <- df[match(clusters, df$cluster), ]
+    df$log2_OR
+  })
+)
+
+rownames(log2_or_mat) <- names(df_list)
+colnames(log2_or_mat) <- clusters
+
+# ---------------------------
+# 3. Build star matrix based on adj_p_value
+# ---------------------------
+p_to_stars <- function(p) {
+  cut(
+    p,
+    breaks = c(-Inf, 1e-4, 1e-3, 1e-2, 0.05, Inf),
+    labels = c("****", "***", "**", "*", ""),
+    right = FALSE
+  )
+}
+
+star_mat <- do.call(
+  rbind,
+  lapply(df_list, function(df) {
+    df <- df[match(clusters, df$cluster), ]
+    as.character(p_to_stars(df$adj_p_value))
+  })
+)
+
+rownames(star_mat) <- names(df_list)
+colnames(star_mat) <- clusters
+
+# ---------------------------
+# 4. Shorten cluster names for display
+# ---------------------------
+colnames(log2_or_mat) <- sub("^pt_window_", "", colnames(log2_or_mat))
+colnames(star_mat) <- colnames(log2_or_mat)
+
+# ---------------------------
+# 5. Clip Inf values and define full viridis color scale
+# ---------------------------
+log2_or_mat_clipped <- log2_or_mat
+finite_vals <- log2_or_mat[is.finite(log2_or_mat)]
+log2_or_mat_clipped[!is.finite(log2_or_mat_clipped)] <- max(finite_vals)
+
+n_breaks <- 100
+breaks <- seq(min(finite_vals), max(finite_vals), length.out = n_breaks)
+colors <- viridis(n_breaks, option = "D")
+col_fun <- colorRamp2(breaks, colors)
+
+# ---------------------------
+# 6. Define bottom cell type annotation
+# ---------------------------
+cell_colors <- c(
+  "NSC" = "#FC8D62",
+  "INP" = "#E78AC3",
+  "NB"  = "#8DA0CB",
+  "YGN" = "#A6D854",
+  "GN"  = "#66C2A5"
+)
+
+cell_type_vec <- MDD_all$cell_type[match(clusters, MDD_all$cluster)]
+cell_type_vec_factor <- factor(cell_type_vec, levels = unique(cell_type_vec))  # preserve order
+
+bottom_ha <- HeatmapAnnotation(
+  CellType = cell_type_vec_factor,
+  col = list(CellType = cell_colors),
+  annotation_name_side = "left"
+)
+
+# ---------------------------
+# 7. Define left row annotation for disorder groups
+# ---------------------------
+row_group <- c(
+  BIP = "Neuropsychiatric",
+  MDD = "Neuropsychiatric",
+  SCZ = "Neuropsychiatric",
+  ALS = "Neurodegenerative",
+  PAR = "Neurodegenerative"
+)
+
+row_group_vec <- factor(row_group[rownames(log2_or_mat_clipped)],
+                        levels = c("Neuropsychiatric", "Neurodegenerative"))
+
+row_colors <- c(
+  "Neuropsychiatric" = "#B0B0B0",
+  "Neurodegenerative" = "#505050"
+)
+
+left_ha <- rowAnnotation(
+  Group = row_group_vec,
+  col = list(Group = row_colors),
+  annotation_name_side = "top"
+)
+
+# ---------------------------
+# 8. Draw heatmap
+# ---------------------------
+p <- Heatmap(
+  log2_or_mat_clipped,
+  name = "log2(OR)",
+  col = col_fun,
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  row_title = "Complex traits",
+  column_title = "Pseudotime ordered windows",
+  column_title_side = "bottom",
+  row_names_side = "left",
+  column_names_rot = 0,
+  bottom_annotation = bottom_ha,
+  left_annotation = left_ha,
+  cell_fun = function(j, i, x, y, w, h, fill) {
+    grid::grid.text(
+      star_mat[i, j],
+      x, y,
+      gp = grid::gpar(fontsize = 12)
+    )
+  },
+  width = unit(ncol(log2_or_mat_clipped), "cm"),
+  height = unit(nrow(log2_or_mat_clipped), "cm")
+)
+
+# Render heatmap
+p
+
+```
+
+
+```{r, fig.height=6, fig.width=10}
+library(ComplexHeatmap)
+library(circlize)
+library(viridisLite)
+library(grid)  # for grid.text and unit
+
+# ---------------------------
+# 1. Combine data
+# ---------------------------
+df_list <- list(
+  BIP = BIP_all,
+  MDD = MDD_all,
+  SCZ = SCZ_all,
+  ALS = ALS_all,
+  PAR = PAR_all
+)
+
+# X-axis ordering based on MDD_all clusters
+clusters <- MDD_all$cluster
+
+# ---------------------------
+# 2. Build log2_OR matrix
+# ---------------------------
+log2_or_mat <- do.call(
+  rbind,
+  lapply(df_list, function(df) {
+    df <- df[match(clusters, df$cluster), ]
+    df$log2_OR
+  })
+)
+
+rownames(log2_or_mat) <- names(df_list)
+colnames(log2_or_mat) <- clusters
+
+# ---------------------------
+# 3. Build star matrix based on adj_p_value
+# ---------------------------
+p_to_stars <- function(p) {
+  cut(
+    p,
+    breaks = c(-Inf, 1e-4, 1e-3, 1e-2, 0.05, Inf),
+    labels = c("****", "***", "**", "*", ""),
+    right = FALSE
+  )
+}
+
+star_mat <- do.call(
+  rbind,
+  lapply(df_list, function(df) {
+    df <- df[match(clusters, df$cluster), ]
+    as.character(p_to_stars(df$adj_p_value))
+  })
+)
+
+rownames(star_mat) <- names(df_list)
+colnames(star_mat) <- clusters
+
+# ---------------------------
+# 4. Shorten cluster names for display
+# ---------------------------
+colnames(log2_or_mat) <- sub("^pt_window_", "", colnames(log2_or_mat))
+colnames(star_mat) <- colnames(log2_or_mat)
+
+# ---------------------------
+# 5. Clip Inf values while preserving sign
+# ---------------------------
+log2_or_mat_clipped <- log2_or_mat
+
+finite_vals <- log2_or_mat[is.finite(log2_or_mat)]
+max_val <- max(finite_vals)
+min_val <- min(finite_vals)
+
+# Only clip +Inf, leave -Inf for grey cells
+log2_or_mat_clipped[log2_or_mat == Inf] <- max_val
+
+n_breaks <- 100
+breaks <- seq(min_val, max_val, length.out = n_breaks)
+colors <- viridis(n_breaks, option = "D")
+col_fun <- colorRamp2(breaks, colors)
+
+# ---------------------------
+# 6. Define bottom cell type annotation
+# ---------------------------
+cell_colors <- c(
+  "NSC" = "#FC8D62",
+  "INP" = "#E78AC3",
+  "NB"  = "#8DA0CB",
+  "YGN" = "#A6D854",
+  "GN"  = "#66C2A5"
+)
+
+cell_type_vec <- MDD_all$cell_type[match(clusters, MDD_all$cluster)]
+cell_type_vec_factor <- factor(cell_type_vec, levels = unique(cell_type_vec))  # preserve order
+
+bottom_ha <- HeatmapAnnotation(
+  CellType = cell_type_vec_factor,
+  col = list(CellType = cell_colors),
+  annotation_name_side = "left"
+)
+
+# ---------------------------
+# 7. Define left row annotation for disorder groups
+# ---------------------------
+row_group <- c(
+  BIP = "Neuropsychiatric",
+  MDD = "Neuropsychiatric",
+  SCZ = "Neuropsychiatric",
+  ALS = "Neurodegenerative",
+  PAR = "Neurodegenerative"
+)
+
+row_group_vec <- factor(row_group[rownames(log2_or_mat_clipped)],
+                        levels = c("Neuropsychiatric", "Neurodegenerative"))
+
+row_colors <- c(
+  "Neuropsychiatric" = "#B0B0B0",
+  "Neurodegenerative" = "#505050"
+)
+
+left_ha <- rowAnnotation(
+  Group = row_group_vec,
+  col = list(Group = row_colors),
+  annotation_name_side = "top"
+)
+
+# ---------------------------
+# 8. Draw heatmap with grey for -Inf cells
+# ---------------------------
+p <- Heatmap(
+  log2_or_mat_clipped,
+  name = "log2(OR)",
+  col = col_fun,
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  row_title = "Complex traits",
+  column_title = "Pseudotime ordered windows",
+  column_title_side = "bottom",
+  row_names_side = "left",
+  column_names_rot = 0,
+  bottom_annotation = bottom_ha,
+  left_annotation = left_ha,
+
+  cell_fun = function(j, i, x, y, w, h, fill) {
+
+    if (log2_or_mat[i, j] == -Inf) {
+      # grey cell for zero overlap
+      grid::grid.rect(
+        x, y, w, h,
+        gp = grid::gpar(fill = "grey80", col = NA)
+      )
+    } else {
+      # normal colored cell
+      grid::grid.rect(
+        x, y, w, h,
+        gp = grid::gpar(fill = fill, col = NA)
+      )
+    }
+
+    # draw stars
+    grid::grid.text(
+      star_mat[i, j],
+      x, y,
+      gp = grid::gpar(fontsize = 12)
+    )
+  },
+
+  width = unit(ncol(log2_or_mat_clipped), "cm"),
+  height = unit(nrow(log2_or_mat_clipped), "cm")
+)
+
+# Render heatmap
+p
+
+```
+
+
+
+```{r, fig.height=6, fig.width=10}
+library(ComplexHeatmap)
+library(circlize)
+library(viridisLite)
+library(grid)  # for grid.text and unit
+
+# ---------------------------
+# 1. Combine data
+# ---------------------------
+df_list <- list(
+  BIP = BIP_all,
+  MDD = MDD_all,
+  SCZ = SCZ_all,
+  ALS = ALS_all,
+  PAR = PAR_all
+)
+
+clusters <- MDD_all$cluster  # X-axis ordering
+
+# ---------------------------
+# 2. Build log2_OR matrix
+# ---------------------------
+log2_or_mat <- do.call(
+  rbind,
+  lapply(df_list, function(df) {
+    df <- df[match(clusters, df$cluster), ]
+    df$log2_OR
+  })
+)
+
+rownames(log2_or_mat) <- names(df_list)
+colnames(log2_or_mat) <- clusters
+
+# ---------------------------
+# 3. Build star matrix
+# ---------------------------
+p_to_stars <- function(p) {
+  cut(
+    p,
+    breaks = c(-Inf, 1e-4, 1e-3, 1e-2, 0.05, Inf),
+    labels = c("****", "***", "**", "*", ""),
+    right = FALSE
+  )
+}
+
+star_mat <- do.call(
+  rbind,
+  lapply(df_list, function(df) {
+    df <- df[match(clusters, df$cluster), ]
+    as.character(p_to_stars(df$adj_p_value))
+  })
+)
+
+rownames(star_mat) <- names(df_list)
+colnames(star_mat) <- clusters
+
+# ---------------------------
+# 4. Shorten cluster names for display
+# ---------------------------
+colnames(log2_or_mat) <- sub("^pt_window_", "", colnames(log2_or_mat))
+colnames(star_mat) <- colnames(log2_or_mat)
+
+# ---------------------------
+# 5. Convert -Inf to NA for grey cells
+# ---------------------------
+log2_or_mat_clipped <- log2_or_mat
+log2_or_mat_clipped[log2_or_mat_clipped == -Inf] <- NA
+
+finite_vals <- log2_or_mat_clipped[is.finite(log2_or_mat_clipped)]
+min_val <- min(finite_vals)
+max_val <- max(finite_vals)
+
+n_breaks <- 100
+breaks <- seq(min_val, max_val, length.out = n_breaks)
+colors <- viridis(n_breaks, option = "D")
+col_fun <- colorRamp2(breaks, colors)
+
+# ---------------------------
+# 6. Bottom cell type annotation
+# ---------------------------
+cell_colors <- c(
+  "NSC" = "#FC8D62",
+  "INP" = "#E78AC3",
+  "NB"  = "#8DA0CB",
+  "YGN" = "#A6D854",
+  "GN"  = "#66C2A5"
+)
+
+cell_type_vec <- MDD_all$cell_type[match(clusters, MDD_all$cluster)]
+cell_type_vec_factor <- factor(cell_type_vec, levels = unique(cell_type_vec))
+
+bottom_ha <- HeatmapAnnotation(
+  CellType = cell_type_vec_factor,
+  col = list(CellType = cell_colors),
+  annotation_name_side = "left"
+)
+
+# ---------------------------
+# 7. Left row annotation for disorder groups
+# ---------------------------
+row_group <- c(
+  BIP = "Neuropsychiatric",
+  MDD = "Neuropsychiatric",
+  SCZ = "Neuropsychiatric",
+  ALS = "Neurodegenerative",
+  PAR = "Neurodegenerative"
+)
+
+row_group_vec <- factor(row_group[rownames(log2_or_mat_clipped)],
+                        levels = c("Neuropsychiatric", "Neurodegenerative"))
+
+row_colors <- c(
+  "Neuropsychiatric" = "#B0B0B0",
+  "Neurodegenerative" = "#505050"
+)
+
+left_ha <- rowAnnotation(
+  Group = row_group_vec,
+  col = list(Group = row_colors),
+  annotation_name_side = "top"
+)
+
+# ---------------------------
+# 8. Draw heatmap with NA cells in grey
+# ---------------------------
+p <- Heatmap(
+  log2_or_mat_clipped,
+  name = "log2(OR)",
+  col = col_fun,
+  cluster_rows = T,
+  cluster_columns = FALSE,
+  row_title = "Complex traits",
+  column_title = "Pseudotime ordered windows",
+  column_title_side = "bottom",
+  row_names_side = "left",
+  column_names_rot = 0,
+  bottom_annotation = bottom_ha,
+  left_annotation = left_ha,
+
+  cell_fun = function(j, i, x, y, w, h, fill) {
+
+    if (is.na(log2_or_mat_clipped[i, j])) {
+      # grey cell for zero overlap
+      grid::grid.rect(
+        x, y, w, h,
+        gp = grid::gpar(fill = "grey80", col = NA)
+      )
+    } else {
+      # normal colored cell
+      grid::grid.rect(
+        x, y, w, h,
+        gp = grid::gpar(fill = fill, col = NA)
+      )
+    }
+
+    # draw stars
+    grid::grid.text(
+      star_mat[i, j],
+      x, y,
+      gp = grid::gpar(fontsize = 12)
+    )
+  },
+
+  width = unit(ncol(log2_or_mat_clipped), "cm"),
+  height = unit(nrow(log2_or_mat_clipped), "cm")
+)
+
+# Render heatmap
+p
+
+```
+
+
+
+
+PDF
+```{r}
+pdf(file = "DEG_output/DEG_OT_fisher_heatmap_all_genes_stratified.pdf", height = 6, width = 10)
+
+p
+
+dev.off()
+```
+
+
+# Notes
+
+<details>
+  <summary>Click to show Session Info</summary>
+
+```{r}
+sessionInfo()
+```
+
+</details>

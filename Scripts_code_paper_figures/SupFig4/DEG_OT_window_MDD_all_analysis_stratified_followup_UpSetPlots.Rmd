@@ -1,0 +1,632 @@
+---
+title: "DEG_OT_window_MDD_all_analysis_stratified"
+output: 
+  rmarkdown::html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: readable
+vignette: >
+  %\VignetteIndexEntry{My Standalone Vignette}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+---
+
+# Load libraries
+
+Load the necessary libraries.
+```{r, message=FALSE, warning=FALSE}
+library(Seurat)
+library(SeuratObject)
+library(dplyr)
+library(MASS)
+library(viridis)
+library(stringr)
+library(patchwork)
+library(ggplot2)
+library(readr)
+library(STEAM)
+library(tidyr)
+library(reshape2)
+library(ggnewscale)
+#library(ComplexHeatmap)
+library(gprofiler2)
+#library(circlize)
+library(UpSetR)
+```
+
+
+
+# Load data
+
+Load Seurat object.
+```{r}
+se <- readRDS("Seurat_objects/Postnatal_human_seurat_v5_GNxEarly_filtered_trajectory_lineage_cells_harmony_no_outliers.rds")
+se
+head(se[[]])
+```
+
+
+Load ranked gene lists (here from Open Targets). Please note that it is essential for downstream analysis that the gene lists are ranked from this point forward to do empirical selection of all genetic genes.
+```{r class.source = 'fold-show'}
+
+OpenTargets_MDD_Genetic_all_ <- as.character(t(read.table(file = "data/OpenTargets/ranked_gene_sets/OT-MONDO_0002009-associated-targets-9_15_2026-v26_06_weights_genetics_only_MDD_ranked.csv")))
+length(OpenTargets_MDD_Genetic_all_)
+
+```
+
+
+Filter out genes not present in the Seurat object.
+```{r}
+# Extract gene names from the Seurat object
+gene_names <- rownames(se)
+
+# Remove genes not present in the Seurat object from the gene lists
+OpenTargets_MDD_Genetic_all_ <- unique(OpenTargets_MDD_Genetic_all_[OpenTargets_MDD_Genetic_all_ %in% gene_names])
+length(OpenTargets_MDD_Genetic_all_)
+```
+
+
+Load DEG results
+```{r, eval=T}
+DEG_genes_all <- read.table(file="DEG_output/DEG_genes_all_tested_MDD_stratified.csv", header = T, sep = ";")
+
+DEG_genes <- subset(DEG_genes_all, subset = p_val_adj <= 0.05) # using only significant DEG
+```
+
+
+
+Assign and check pseudotime windows.
+```{r}
+assign_pseudotime_windows <- function(
+  seurat_obj,
+  pseudotime_col,
+  mode = c("sliding", "stratified"),
+  window_size = NULL,          # used in sliding mode
+  windows_per_anno = NULL,     # used in stratified mode
+  cell_anno_col = NULL,        # used in stratified mode
+  output_col = "pseudotime_windows"
+) {
+  # Validate mode
+  mode <- match.arg(mode)
+
+  meta <- seurat_obj@meta.data
+  meta[[output_col]] <- NA_character_
+
+  if (mode == "sliding") {
+    # ----- Argument check -----
+    if (is.null(window_size)) stop("`window_size` must be provided when mode = 'sliding'")
+
+    # Extract pseudotime
+    pt_values <- meta[[pseudotime_col]]
+    cells <- rownames(meta)
+
+    df <- data.frame(
+      cell = cells,
+      pseudotime = pt_values,
+      stringsAsFactors = FALSE
+    )
+
+    # Order cells by pseudotime
+    df_ordered <- df[order(df$pseudotime, na.last = TRUE), , drop = FALSE]
+
+    # Non-NA pseudotime
+    non_na_idx <- which(!is.na(df_ordered$pseudotime))
+    n_non_na <- length(non_na_idx)
+
+    if (n_non_na == 0) {
+      seurat_obj@meta.data[[output_col]] <- NA
+      return(seurat_obj)
+    }
+
+    # Assign windows
+    window_ids <- ceiling(seq_len(n_non_na) / window_size)
+
+    # Merge last window if too small
+    last_window_size <- n_non_na - (max(window_ids) - 1) * window_size
+    if (last_window_size < window_size && max(window_ids) > 1) {
+      window_ids[window_ids == max(window_ids)] <- max(window_ids) - 1
+    }
+
+    # Assign labels
+    labels <- rep(NA_character_, nrow(df_ordered))
+    labels[non_na_idx] <- paste0("pt_window_", window_ids)
+    labels_by_cell <- setNames(labels, df_ordered$cell)
+    meta[[output_col]] <- labels_by_cell[rownames(meta)]
+
+  } else if (mode == "stratified") {
+    # ----- Argument check -----
+    if (is.null(windows_per_anno) || is.null(cell_anno_col)) {
+      stop("`windows_per_anno` and `cell_anno_col` must be provided when mode = 'stratified'")
+    }
+
+    current_window_id <- 1  # global counter
+
+    # Loop over each annotation
+    for (anno in names(windows_per_anno)) {
+      n_windows <- windows_per_anno[[anno]]
+
+      # Cells in this annotation with valid pseudotime
+      idx <- which(
+        meta[[cell_anno_col]] == anno &
+        !is.na(meta[[pseudotime_col]])
+      )
+
+      if (length(idx) == 0) {
+        current_window_id <- current_window_id + n_windows
+        next
+      }
+
+      # Order cells by pseudotime
+      idx_ordered <- idx[order(meta[[pseudotime_col]][idx])]
+
+      # Local window IDs
+      local_ids <- cut(
+        seq_along(idx_ordered),
+        breaks = n_windows,
+        labels = FALSE
+      )
+
+      # Map to global IDs
+      global_ids <- local_ids + current_window_id - 1
+      meta[[output_col]][idx_ordered] <- paste0("pt_window_", global_ids)
+
+      # Advance global counter
+      current_window_id <- current_window_id + n_windows
+    }
+  }
+
+  seurat_obj@meta.data <- meta
+  return(seurat_obj)
+}
+
+```
+
+
+```{r}
+se <- assign_pseudotime_windows(
+  se,
+  pseudotime_col = "cell_rank_ordered",
+  mode = "stratified",
+  cell_anno_col = "cell_anno",
+  windows_per_anno = list(NSC = 2, INP = 3, NB  = 3, YGN = 2, GN  = 3)
+)
+
+table(se$pseudotime_windows)
+```
+
+
+Plot pseudotime window assignment.
+```{r}
+#library(dplyr)
+#library(ggplot2)
+
+# Extract metadata
+meta <- se[[]]
+
+# Set colors
+cell_colors <- c(
+  "NSC" = "#FC8D62",
+  "INP" = "#E78AC3",
+  "NB"  = "#8DA0CB",
+  "YGN" = "#A6D854",
+  "GN"  = "#66C2A5"
+)
+
+# Ensure cell_rank_ordered is a factor (discrete)
+meta$cell_rank_ordered <- factor(
+  meta$cell_rank_ordered,
+  levels = sort(unique(meta$cell_rank_ordered)),
+  ordered = TRUE
+)
+
+# Ensure pseudotime windows are ordered numerically
+meta$pseudotime_windows <- factor(
+  meta$pseudotime_windows,
+  levels = paste0(
+    "pt_window_",
+    seq_len(max(
+      as.numeric(gsub("pt_window_", "", meta$pseudotime_windows)),
+      na.rm = TRUE
+    ))
+  ),
+  ordered = TRUE
+)
+
+# Count cells per type per rank and compute fractions
+plot_long <- meta %>%
+  filter(cell_anno %in% names(cell_colors)) %>%
+  count(cell_rank_ordered, cell_anno, name = "Count") %>%
+  group_by(cell_rank_ordered) %>%
+  mutate(Fraction = Count / sum(Count)) %>%
+  ungroup() %>%
+  rename(CellType = cell_anno)
+
+plot_long$CellType <- factor(plot_long$CellType, levels = names(cell_colors))
+
+# Compute window boundaries
+window_bounds <- meta %>%
+  filter(!is.na(pseudotime_windows)) %>%
+  group_by(pseudotime_windows) %>%
+  summarise(
+    start = min(as.numeric(cell_rank_ordered)),
+    end   = max(as.numeric(cell_rank_ordered)),
+    .groups = "drop"
+  ) %>%
+  arrange(start)
+
+# Vertical line positions (between windows)
+vline_positions <- window_bounds$end[-nrow(window_bounds)] + 0.5
+
+# Window label positions
+window_labels <- window_bounds %>%
+  mutate(xpos = (start + end) / 2)
+
+# X-axis breaks and labels = start of each window
+x_breaks <- window_bounds$start
+x_labels <- window_bounds$start  # numeric ticks
+
+# Plot
+ggplot(plot_long, aes(x = cell_rank_ordered, y = Fraction, fill = CellType)) +
+  geom_bar(stat = "identity", width = 1) +
+  geom_vline(
+    xintercept = vline_positions,
+    linetype = "dotted",
+    color = "black"
+  ) +
+  geom_text(
+    data = window_labels,
+    aes(x = xpos, y = 1.05, label = pseudotime_windows),
+    inherit.aes = FALSE,
+    angle = 90,
+    hjust = 0,
+    vjust = 0,
+    size = 4
+  ) +
+  scale_fill_manual(values = cell_colors) +
+  labs(
+    x = "Cell rank",
+    y = "Fraction of cells",
+    title = "Cell type composition along trajectory with pseudotime windows"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.5))) +
+  scale_x_discrete(
+    breaks = levels(meta$cell_rank_ordered)[x_breaks],
+    labels = x_labels
+  ) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+```
+
+
+# Gene set scores
+
+```{r}
+find_OT_genes_per_window <- function(DEG_genes, OT_genes) {
+  
+  # extract numeric window index
+  window_df <- data.frame(
+    cluster = unique(DEG_genes$cluster),
+    window_num = as.integer(sub("pt_window_", "", unique(DEG_genes$cluster)))
+  )
+  
+  # order windows numerically
+  window_df <- window_df[order(window_df$window_num), ]
+  windows <- window_df$cluster
+  
+  # keep only DEG rows where gene is in OpenTargets list
+  hits <- DEG_genes[DEG_genes$gene %in% OT_genes, ]
+  
+  # build ordered output list
+  result <- lapply(windows, function(w) {
+    genes <- unique(hits$gene[hits$cluster == w])
+    if (length(genes) == 0) NA else genes
+  })
+  
+  names(result) <- windows
+  
+  return(result)
+}
+
+```
+
+
+```{r}
+OT_by_window <- find_OT_genes_per_window(
+  DEG_genes = DEG_genes,
+  OT_genes  = OpenTargets_MDD_Genetic_all_
+)
+
+OT_by_window
+
+```
+
+
+Calculate gene set scores for each window.
+```{r}
+all_gene_sets <- OT_by_window
+
+score.mat <- matrix(
+  data = NA,
+  nrow = length(all_gene_sets),
+  ncol = 1,
+  dimnames = list(names(all_gene_sets), "% of genes present")
+)
+
+
+for (i in seq_along(all_gene_sets)) {
+  
+  genes <- all_gene_sets[[i]]
+  
+  # case: no overlapping genes
+  if (length(genes) == 1 && is.na(genes)) {
+    score.mat[i, 1] <- 0
+    next
+  }
+  
+  # % of genes present in Seurat object
+  score.mat[i, 1] <- mean(genes %in% rownames(se))
+  
+  # add module score
+  se <- AddModuleScore(
+    object = se,
+    features = list(genes),
+    ctrl = 100,
+    name     = paste0(names(all_gene_sets)[i], "_")
+  )
+}
+
+
+score.mat * 100
+```
+
+
+```{r, warning=FALSE,fig.height=5,fig.height=7}
+update_factor_order <- paste0("pt_window_", 1:length(table(se$pseudotime_windows)))
+se$pseudotime_windows <- factor(se$pseudotime_windows, levels = update_factor_order)
+
+
+VlnPlot(se, features = c("pt_window_1_1"), group.by = "pseudotime_windows")
+VlnPlot(se, features = c("pt_window_2_1"), group.by = "pseudotime_windows")
+VlnPlot(se, features = c("pt_window_3_1"), group.by = "pseudotime_windows")
+VlnPlot(se, features = c("pt_window_4_1"), group.by = "pseudotime_windows")
+VlnPlot(se, features = c("pt_window_5_1"), group.by = "pseudotime_windows")
+VlnPlot(se, features = c("pt_window_6_1"), group.by = "pseudotime_windows")
+VlnPlot(se, features = c("pt_window_7_1"), group.by = "pseudotime_windows")
+VlnPlot(se, features = c("pt_window_8_1"), group.by = "pseudotime_windows")
+VlnPlot(se, features = c("pt_window_9_1"), group.by = "pseudotime_windows")
+VlnPlot(se, features = c("pt_window_10_1"), group.by = "pseudotime_windows")
+VlnPlot(se, features = c("pt_window_11_1"), group.by = "pseudotime_windows")
+VlnPlot(se, features = c("pt_window_12_1"), group.by = "pseudotime_windows")
+VlnPlot(se, features = c("pt_window_13_1"), group.by = "pseudotime_windows")
+```
+
+
+
+
+# UpSet plot
+
+```{r, fig.height=9, fig.width=12}
+window_set_order <- rev(names(table(se$pseudotime_windows)))
+
+p <- upset(fromList(OT_by_window), order.by = "freq", nsets = length(table(se$pseudotime_windows)), sets = window_set_order, keep.order = T, text.scale = c(2, 2, 2, 2, 2), mainbar.y.label = "OT genes among DEGs")
+
+p
+```
+
+PDF
+```{r, eval=T}
+pdf(file = "DEG_output/GO_analysis/UpSetPlot_MDD_stratified_pseudotime_windows_all_genes.pdf", height = 9, width = 12)
+
+p
+
+dev.off()
+```
+
+
+All MDD genes.
+```{r}
+# NB_YGN_neurogenesis_genes
+window_6 <- c("CRB1","MDGA1","NR2F1","TCF4","MAP2","RERE","CDH4","NRXN1","PRDM8","ZNF536","PTPRD","ELAVL4","SYNE2","ASTN1","MAGI2","SOX5","KLF7","ZSWIM6","PBRM1","ZNF804A","BRAF","ROCK1")
+window_7 <- c("PTPRD","NRXN1","TCF4","MDGA1","ZNF804A","ZNF536","KLF7","MAP2","ZSWIM6","MAGI2","RERE","PRDM8","DCC","SEMA3A","ASTN1","CTNNA2","NR2F1","CDH4","PBRM1")
+window_8 <- c("DCC","TCF4","NRXN1","PTPRD","SEMA3A","KLF7","ZNF804A","MAP2","ZNF536","NCAM1","KIRREL3","ZSWIM6","RERE","NAV2","CTNNA2","PHACTR1","CCDC88A")
+window_9 <- c("EFNA5","TENM2","ROBO1","SEMA6D","RIMS1","CNTN5","NEGR1","GRM5","DCC","MEF2C","TMEM108","NTRK3","ZNF804A","PTPRG","GRIN2A","ANK3","BCL11B","KIRREL3","SEMA3A","NLGN1","PPP3CA","ZNF536","DMD","CNTN4","CTNNA2","RTN1","PPARG","TNR")
+window_10 <- c("OLFM1","RIMS1","CNTN5","MEF2C","GRIN2A","BCL11B","NEGR1","TENM2","NLGN1","ROBO1","DMD","PPP3CA","TMEM108","ANK3","GRM5","SEMA6D","PPARG","TNR","AGBL4","NGEF","DCC","SLIT1","KIRREL3","KCNB1","NTRK3","BHLHE22","KIF1A","FILIP1","UNC5D","RTN1","PAQR3","BAIAP2","ZNF804A","ULK4","PTPRG","EFNA5","ADGRB1","SIPA1L1","ADARB1")
+  
+NB_YGN_neurogenesis_genes <- list(window_6=window_6, window_7=window_7, window_8=window_8, window_9=window_9, window_10=window_10)
+```
+
+
+```{r, fig.height=9}
+window_set_order_NB_YGN_neurogenesis_genes <- rev(names(NB_YGN_neurogenesis_genes))
+
+p <- upset(fromList(NB_YGN_neurogenesis_genes), order.by = "freq", nsets = length(names(NB_YGN_neurogenesis_genes)), sets = window_set_order_NB_YGN_neurogenesis_genes, keep.order = T, text.scale = c(3, 3, 3, 3, 3, 3), mainbar.y.label = "All MDD genes among DEGs\n(GO:BP neurogenesis)", sets.bar.color = c("#A6D854","#A6D854","#8DA0CB","#8DA0CB","#8DA0CB"))
+
+p
+```
+
+
+PDF
+```{r, eval=T}
+pdf(file = "DEG_output/GO_analysis/UpSetPlot_MDD_stratified_pseudotime_windows_all_genes_NB_YGN_neurogenesis.pdf", height = 9, width = 12)
+
+p
+
+dev.off()
+```
+
+
+
+```{r}
+# Combine windows all others then 8
+# Put all windows except 8 into a list
+other_windows_list <- list(
+  NB_YGN_neurogenesis_genes$window_6,
+  NB_YGN_neurogenesis_genes$window_7,
+  NB_YGN_neurogenesis_genes$window_9,
+  NB_YGN_neurogenesis_genes$window_10
+)
+
+# Reduce with union
+other_windows <- Reduce(union, other_windows_list)
+
+# Find genes only in window 8
+unique_window_8 <- setdiff(NB_YGN_neurogenesis_genes$window_8, other_windows)
+
+# View result
+unique_window_8
+```
+
+
+```{r, warning=FALSE,fig.height=5,fig.height=7}
+se$pseudotime_windows_plot <- gsub("^pt_window_", "", se$pseudotime_windows)
+
+se$pseudotime_windows_plot <- as.numeric(as.character(se$pseudotime_windows_plot))
+se$pseudotime_windows_plot <- factor(se$pseudotime_windows_plot, levels = sort(unique(se$pseudotime_windows_plot)))
+
+
+VlnPlot(se, features = c("NCAM1"), group.by = "pseudotime_windows_plot", cols = c("#FC8D62","#FC8D62","#E78AC3","#E78AC3","#E78AC3","#8DA0CB","#8DA0CB","#8DA0CB","#A6D854","#A6D854","#66C2A5","#66C2A5","#66C2A5"))+ theme(
+  axis.text.x = element_text(angle = 0, hjust = 0.5) 
+) +
+labs(
+  x = "Pseudotime ordered windows",
+  y = "Normalized expression"
+)
+
+
+VlnPlot(se, features = c("NAV2"), group.by = "pseudotime_windows_plot", cols = c("#FC8D62","#FC8D62","#E78AC3","#E78AC3","#E78AC3","#8DA0CB","#8DA0CB","#8DA0CB","#A6D854","#A6D854","#66C2A5","#66C2A5","#66C2A5"))+ theme(
+  axis.text.x = element_text(angle = 0, hjust = 0.5) 
+) +
+labs(
+  x = "Pseudotime ordered windows",
+  y = "Normalized expression"
+)
+
+
+VlnPlot(se, features = c("PHACTR1"), group.by = "pseudotime_windows_plot", cols = c("#FC8D62","#FC8D62","#E78AC3","#E78AC3","#E78AC3","#8DA0CB","#8DA0CB","#8DA0CB","#A6D854","#A6D854","#66C2A5","#66C2A5","#66C2A5"))+ theme(
+  axis.text.x = element_text(angle = 0, hjust = 0.5) 
+) +
+labs(
+  x = "Pseudotime ordered windows",
+  y = "Normalized expression"
+)
+
+VlnPlot(se, features = c("CCDC88A"), group.by = "pseudotime_windows_plot", cols = c("#FC8D62","#FC8D62","#E78AC3","#E78AC3","#E78AC3","#8DA0CB","#8DA0CB","#8DA0CB","#A6D854","#A6D854","#66C2A5","#66C2A5","#66C2A5"))+ theme(
+  axis.text.x = element_text(angle = 0, hjust = 0.5)
+) +
+labs(
+  x = "Pseudotime ordered windows",
+  y = "Normalized expression"
+)
+
+
+
+#update_factor_order <- paste0("pt_window_", 1:length(table(se$pseudotime_windows)))
+#se$pseudotime_windows <- factor(se$pseudotime_windows, levels = update_factor_order)
+
+
+
+VlnPlot(se, features = c("pt_window_8_1"), group.by = "pseudotime_windows_plot", cols = c("#FC8D62","#FC8D62","#E78AC3","#E78AC3","#E78AC3","#8DA0CB","#8DA0CB","#8DA0CB","#A6D854","#A6D854","#66C2A5","#66C2A5","#66C2A5"))+ theme(
+  axis.text.x = element_text(angle = 0, hjust = 0.5) 
+) +
+labs(
+  x = "Pseudotime ordered windows",
+  y = "Gene set score"
+)
+
+```
+
+
+PDF
+```{r, eval=T}
+pdf(file = "DEG_output/GO_analysis/UpSetPlot_MDD_stratified_pseudotime_windows_all_genes_window_8_gene_set_score.pdf", height = 6, width = 8)
+
+VlnPlot(se, features = c("pt_window_8_1"), group.by = "pseudotime_windows_plot", cols = c("#FC8D62","#FC8D62","#E78AC3","#E78AC3","#E78AC3","#8DA0CB","#8DA0CB","#8DA0CB","#A6D854","#A6D854","#66C2A5","#66C2A5","#66C2A5"))+ theme(
+  axis.text.x = element_text(angle = 0, hjust = 0.5) 
+) +
+labs(
+  x = "Pseudotime ordered windows",
+  y = "Gene set score"
+)
+
+
+dev.off()
+```
+
+
+
+```{r, fig.width=18, fig.height=25}
+se$pseudotime_windows_plot <- gsub("^pt_window_", "", se$pseudotime_windows)
+
+se$pseudotime_windows_plot <- as.numeric(as.character(se$pseudotime_windows_plot))
+se$pseudotime_windows_plot <- factor(se$pseudotime_windows_plot, levels = sort(unique(se$pseudotime_windows_plot)))
+
+
+# pt_window_8 gene list
+genes_to_plot <- OT_by_window$pt_window_8
+
+# Create violin plots for all genes
+plots <- VlnPlot(
+  se,
+  features = genes_to_plot,
+  group.by = "pseudotime_windows_plot",
+  cols = c("#FC8D62","#FC8D62","#E78AC3","#E78AC3","#E78AC3","#8DA0CB","#8DA0CB","#8DA0CB","#A6D854","#A6D854","#66C2A5","#66C2A5","#66C2A5")
+)
+
+# Apply ggplot modifications to all plots
+plots <- lapply(plots, function(p) {
+  p +
+    theme(axis.text.x = element_text(angle = 0, hjust = 0.5)) +
+    labs(x = "Pseudotime ordered windows", y = "Normalized expression")
+})
+
+# Combine all plots into one figure
+library(patchwork)
+wrap_plots(plots, ncol = 4)  # Adjust ncol for layout
+
+```
+
+
+PDF
+```{r, eval=T}
+pdf(file = "DEG_output/GO_analysis/UpSetPlot_MDD_stratified_pseudotime_windows_all_genes_window_8_genes.pdf", height = 25, width = 18)
+
+wrap_plots(plots, ncol = 4)
+
+dev.off()
+```
+
+Window 8 neurogenesis genes
+window_8 <- c("DCC","TCF4","NRXN1","PTPRD","SEMA3A","KLF7","ZNF804A","MAP2","ZNF536","NCAM1","KIRREL3","ZSWIM6","RERE","NAV2","CTNNA2","PHACTR1","CCDC88A")
+
+OT_by_window$pt_window_8
+[1] "ZBTB20"   "DCC"      "TCF4"     "MSRA"     "NRXN1"    "GRM3"     "ENOX1"    "ZNF608"   "PTPRD"    "ANKS1B"   "SEMA3A"  
+[12] "CDH10"    "CELF2"    "DPF3"     "KLF7"     "ZNF804A"  "ASXL3"    "CTTNBP2"  "ARFGEF1"  "THSD7A"   "RABGAP1L" "MAP2"    
+[23] "ZNF536"   "NOL4"     "CCSER1"   "NCAM1"    "KCNB2"    "ANKRD44"  "KIRREL3"  "FTO"      "ZSWIM6"   "RERE"     "NAV2"    
+[34] "MBD5"     "CTNNA2"   "RALGPS1"  "SGIP1"    "GRIK3"    "SETBP1"   "PHACTR1"  "KIAA1328" "PTBP2"    "CCDC88A"  "ELMO1" 
+
+Neurogenesis genes in window 8
+```{r}
+length(OT_by_window$pt_window_8) # OT genes in window 8
+intersect(window_8,OT_by_window$pt_window_8) # OT genes in window 8 also in GO:BP neurogenesis
+length(intersect(window_8,OT_by_window$pt_window_8)) # OT genes in window 8 also in GO:BP neurogenesis
+```
+
+
+
+# Notes
+
+
+<details>
+  <summary>Click to show Session Info</summary>
+
+```{r}
+sessionInfo()
+```
+
+</details>
+
+
+

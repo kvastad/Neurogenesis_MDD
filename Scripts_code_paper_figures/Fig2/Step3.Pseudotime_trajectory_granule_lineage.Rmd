@@ -1,0 +1,788 @@
+---
+title: "Step3.Pseudotime_trajectory_granule_lineage"
+output: 
+  rmarkdown::html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: readable
+vignette: >
+  %\VignetteIndexEntry{My Standalone Vignette}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+---
+
+Generate pseudotime trajectory (supervised).
+
+# Load libraries
+
+Load the necessary libraries.
+```{r, message=FALSE, warning=FALSE}
+library(Seurat)
+library(SeuratObject)
+library(dplyr)
+library(destiny)
+library(STEAM)
+library(future)
+library(ggplot2)
+library(viridis)
+library(reshape2)
+library(scales)
+```
+
+
+# Load data
+
+Load Seurat object.
+```{r}
+lineage_cells <- readRDS("Seurat_objects/Postnatal_human_seurat_v5_GNxEarly_filtered.rds")
+lineage_cells
+
+head(lineage_cells[[]])
+table(lineage_cells$cell_anno)
+```
+
+Update metadata
+```{r}
+lineage_cells$cell_anno[lineage_cells$cell_anno == "early_GN"] <- "GN"
+table(lineage_cells$cell_anno)
+```
+
+
+
+```{r}
+se_outliers <- readRDS("Seurat_objects/Postnatal_human_seurat_v5_GNxEarly_filtered_trajectory_lineage_cells_harmony.rds")
+
+se_outliers
+table(se_outliers$DPT_outlier)
+head(se_outliers[[]])
+```
+
+
+Remove outlier cells
+```{r}
+outlier_cells <- colnames(se_outliers)[se_outliers$DPT_outlier == "outlier"]
+
+lineage_cells <- subset(
+  lineage_cells,
+  cells = setdiff(colnames(lineage_cells), outlier_cells)
+)
+
+```
+
+
+
+Check number of cells per cell type of the cluster annotation you want to create Trajectory MetaCells from.
+```{r}
+table(lineage_cells$cell_anno)
+```
+
+
+
+Check numbar of genes and counts:
+```{r, warning=FALSE, fig.height=7}
+cell_colors <- c(
+  "NSC" = "#FC8D62",
+  "INP" = "#E78AC3",
+  "NB"  = "#8DA0CB",
+  "YGN" = "#A6D854",
+  "GN"  = "#66C2A5"
+)
+
+# Reorder the identities to match the order in cell_colors
+lineage_cells$cell_anno <- factor(lineage_cells$cell_anno, levels = names(cell_colors))
+
+
+VlnPlot(lineage_cells, features = c("nFeature_RNA", "nCount_RNA"), ncol = 1, group.by = "cell_anno",cols = cell_colors)
+```
+
+
+# Pseudotime analysis
+
+Preprocess data.
+```{r}
+# 1. Normalize data
+lineage_cells <- NormalizeData(lineage_cells)
+
+# 2. Find variable features
+lineage_cells <- FindVariableFeatures(lineage_cells)
+
+# 3. Scale data
+lineage_cells <- ScaleData(lineage_cells)
+
+# 4. Run PCA
+lineage_cells <- RunPCA(lineage_cells)
+
+# 5. Elbow plot to help choose number of PCs
+ElbowPlot(lineage_cells, ndims = 50)  # plots variance explained by top 50 PCs
+
+```
+
+
+Calculate a tSNE plot.
+```{r}
+# Run t-SNE using the first 20 PCs
+set.seed(123)
+lineage_cells <- RunTSNE(lineage_cells, dims = 1:20, reduction = "pca")
+
+# Plot t-SNE colored by cell_anno
+DimPlot(lineage_cells, reduction = "tsne", group.by = "cell_anno", label = TRUE,cols = cell_colors)
+```
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("STEAM_plots/tSNE_cell_anno_before_harmony_outlier_removed.pdf", width = 8, height = 6)  # width & height in inches
+
+# Plot t-SNE colored by cell_anno
+DimPlot(lineage_cells, reduction = "tsne", group.by = "cell_anno", label = TRUE,cols = cell_colors)
+
+# Close PDF device
+dev.off()
+```
+
+
+```{r}
+# Plot t-SNE colored by patients
+DimPlot(lineage_cells, reduction = "tsne", group.by = "orig.ident", label = TRUE)
+```
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("STEAM_plots/tSNE_sample_before_harmony_outlier_removed.pdf", width = 8, height = 6)  # width & height in inches
+
+# Plot t-SNE colored by cell_anno
+DimPlot(lineage_cells, reduction = "tsne", group.by = "orig.ident", label = TRUE)
+
+# Close PDF device
+dev.off()
+```
+
+
+
+
+```{r}
+library(harmony)
+
+# Run Harmony
+lineage_cells <- RunHarmony(
+  lineage_cells,             # Seurat object
+  group.by.vars = "orig.ident",  # batch variable to regress out
+  dims.use = 1:50             # PCA dimensions to harmonize
+)
+
+ElbowPlot(lineage_cells, ndims = 50, reduction = "harmony")
+```
+
+
+Calculate a tSNE plot.
+```{r}
+# Run t-SNE using the first 20 PCs
+set.seed(123)
+lineage_cells <- RunTSNE(lineage_cells, dims = 1:20, reduction = "harmony")
+
+# Plot t-SNE colored by cell_anno
+DimPlot(lineage_cells, reduction = "tsne", group.by = "cell_anno", label = TRUE,cols = cell_colors)
+```
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("STEAM_plots/tSNE_cell_anno_after_harmony_outlier_removed.pdf", width = 8, height = 6)  # width & height in inches
+
+# Plot t-SNE colored by cell_anno
+DimPlot(lineage_cells, reduction = "tsne", group.by = "cell_anno", label = TRUE,cols = cell_colors)
+
+# Close PDF device
+dev.off()
+```
+
+
+```{r}
+# Plot t-SNE colored by patients
+DimPlot(lineage_cells, reduction = "tsne", group.by = "orig.ident", label = TRUE)
+```
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("STEAM_plots/tSNE_sample_after_harmony_outlier_removed.pdf", width = 8, height = 6)  # width & height in inches
+
+# Plot t-SNE colored by cell_anno
+DimPlot(lineage_cells, reduction = "tsne", group.by = "orig.ident", label = TRUE)
+
+# Close PDF device
+dev.off()
+```
+
+
+Calculate diffusion map.
+```{r}
+
+pcs <- Embeddings(lineage_cells, "harmony")[, 1:10]  # cells × PCs
+
+# Run diffusion map
+dm <- DiffusionMap(pcs)  # transpose: cells × PCs
+
+
+```
+
+
+Diffusion map of component 1 and 2, colored by cell types.
+```{r}
+
+# Prepare diffusion map dataframe
+df <- data.frame(
+  DC1 = eigenvectors(dm)[,1],
+  DC2 = eigenvectors(dm)[,2],
+  cell_type = factor(lineage_cells$cell_anno, levels = levels(factor(lineage_cells$cell_anno)))
+)
+
+# Plot using Seurat colors
+ggplot(df, aes(x = DC1, y = DC2, color = cell_type)) +
+  geom_point(size = 1) +
+  scale_color_manual(values = cell_colors) +
+  theme_classic() +
+  ggtitle("Diffusion Map colored by Cell Type")
+
+```
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("STEAM_plots/DC_plot_cell_anno_harmony_outlier_removed.pdf", width = 8, height = 6)  # width & height in inches
+
+
+# Prepare diffusion map dataframe
+df <- data.frame(
+  DC1 = eigenvectors(dm)[,1],
+  DC2 = eigenvectors(dm)[,2],
+  cell_type = factor(lineage_cells$cell_anno, levels = levels(factor(lineage_cells$cell_anno)))
+)
+
+# Plot using Seurat colors
+ggplot(df, aes(x = DC1, y = DC2, color = cell_type)) +
+  geom_point(size = 1) +
+  scale_color_manual(values = cell_colors) +
+  theme_classic() +
+  theme(
+    axis.title = element_text(size = 14, color = "black"),  # x and y axis titles
+    axis.text = element_text(size = 12, color = "black")                  # x and y axis tick labels
+  ) +
+  ggtitle("Diffusion Map colored by Cell Type")
+
+# Close PDF device
+dev.off()
+```
+
+
+Calculate pseudotime DPT.
+```{r}
+# Compute pseudotime (DPT)
+dpt <- DPT(dm)
+
+# Assign to Seurat metadata
+dpt_named <- setNames(dpt$DPT1, colnames(dm@transitions))
+lineage_cells$DPT <- NA
+lineage_cells$DPT[Cells(lineage_cells)] <- dpt_named[Cells(lineage_cells)]
+
+```
+
+
+Check diffusion pseudotime (DPT) distribution, using destiny, sometime the time order is reversed.
+```{r}
+aggregate(DPT ~ cell_anno, data = lineage_cells[[]], summary)
+```
+
+
+Plot diffusion pseudotime (DPT) distribution.
+```{r, eval=T}
+hist(lineage_cells$DPT,
+     breaks = seq(0, 50, by = 0.01), 
+     main = "Pseudotime bined",
+     xlab = "Pseudotime (DPT)")
+```
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("STEAM_plots/pseudotime_DPT_bined_harmony_outlier_removed.pdf", width = 8, height = 5)  # width & height in inches
+
+hist(lineage_cells$DPT,
+     breaks = seq(0, 50, by = 0.01),
+     main = "Pseudotime bined",
+     xlab = "Pseudotime (DPT)")
+
+# Close PDF device
+dev.off()
+```
+
+
+Diffusion map of component 1 and 2, colored by pseudotime.
+```{r}
+
+df <- data.frame(
+  DC1 = eigenvectors(dm)[,1],
+  DC2 = eigenvectors(dm)[,2],
+  DPT = lineage_cells$DPT
+)
+
+ggplot(df, aes(x = DC1, y = DC2, color = DPT)) +
+  geom_point(size = 1) +
+  scale_color_viridis_c(option = "B") +
+  theme_classic() +
+  ggtitle("Diffusion Map colored by pseudotime")
+
+```
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("STEAM_plots/DC_plot_pseudotime_DPT_harmony_outlier_removed.pdf", width = 8, height = 6)  # width & height in inches
+
+df <- data.frame(
+  DC1 = eigenvectors(dm)[,1],
+  DC2 = eigenvectors(dm)[,2],
+  DPT = lineage_cells$DPT
+)
+
+ggplot(df, aes(x = DC1, y = DC2, color = DPT)) +
+  geom_point(size = 1) +
+  scale_color_viridis_c(option = "B") +
+  theme_classic() +
+  theme(
+    axis.title = element_text(size = 14, color = "black"),  # x and y axis titles
+    axis.text = element_text(size = 12, color = "black")                  # x and y axis tick labels
+  ) +
+  ggtitle("Diffusion Map colored by pseudotime")
+
+# Close PDF device
+dev.off()
+```
+
+
+
+
+Check the cell rank order for each cell type
+```{r}
+library(dplyr)
+library(ggplot2)
+
+df <- data.frame(
+  DC1 = eigenvectors(dm)[,1],
+  DC2 = eigenvectors(dm)[,2],
+  pseudotime_rank = lineage_cells$DPT,
+  cell_anno = lineage_cells$cell_anno
+)
+
+
+df <- df %>%
+  group_by(cell_anno) %>%
+  mutate(
+    pseudotime_within_cell_anno =
+      (pseudotime_rank - min(pseudotime_rank)) /
+      (max(pseudotime_rank) - min(pseudotime_rank))
+  ) %>%
+  ungroup()
+
+
+p <- ggplot(df, aes(x = DC1, y = DC2, color = pseudotime_within_cell_anno)) +
+  geom_point(size = 1) +
+  scale_color_gradient(
+    low = "blue",
+    high = "red",
+    name = "Within-cell_anno\npseudotime"
+  ) +
+  facet_wrap(~ cell_anno) +
+  theme_classic() +
+  ggtitle("Diffusion map: within-cell_anno pseudotime progression")
+
+p
+```
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("STEAM_plots/DC_plot_pseudotime_DPT_within_cell_types_harmony_outlier_removed.pdf", width = 8, height = 6)  # width & height in inches
+
+p
+
+# Close PDF device
+dev.off()
+```
+
+
+```{r}
+rank_cells <- function(dpt_values, reverse = FALSE) {
+  if (!is.logical(reverse) || length(reverse) != 1) {
+    stop("`reverse` must be a single TRUE/FALSE value.")
+  }
+
+  if (reverse) {
+    return(rank(-dpt_values, ties.method = "first"))
+  } else {
+    return(rank(dpt_values, ties.method = "first"))
+  }
+}
+
+```
+
+
+```{r}
+lineage_cells$cell_rank <- rank_cells(lineage_cells$DPT, reverse=F)
+
+head(lineage_cells[[]])
+```
+
+
+Assign metadata that manually order cells by lineage.
+```{r}
+order_cells_by_lineage <- function(seurat_obj,
+                                           cell_rank_col = "cell_rank",
+                                           cell_type_col = "cell_anno",
+                                           lineage_order) {
+  meta <- seurat_obj@meta.data
+  
+  # Checks
+  if (!(cell_rank_col %in% colnames(meta))) stop("cell_rank_col not found in metadata")
+  if (!(cell_type_col %in% colnames(meta))) stop("cell_type_col not found in metadata")
+  if (!is.character(lineage_order)) stop("lineage_order must be a character vector")
+  
+  # Ensure numeric
+  cell_ranks <- as.numeric(meta[[cell_rank_col]])
+  
+  # Initialize vector to store new ranks
+  new_ranks <- numeric(length(cell_ranks))
+  
+  counter <- 1  # running counter for new ranks
+  
+  for (ct in lineage_order) {
+    idx <- which(meta[[cell_type_col]] == ct)
+    # Sort within cell type
+    sorted_idx <- idx[order(cell_ranks[idx])]
+    n <- length(sorted_idx)
+    new_ranks[sorted_idx] <- counter:(counter + n - 1)
+    counter <- counter + n
+  }
+  
+  return(new_ranks)
+}
+
+```
+
+
+```{r}
+# Assign directly to Seurat object
+lineage_cells$cell_rank_ordered <- order_cells_by_lineage(
+  lineage_cells,
+  cell_rank_col = "DPT",
+  cell_type_col = "cell_anno",
+  lineage_order = c("NSC","INP","NB","YGN","GN")
+)
+
+# Check
+head(lineage_cells[[]])
+tail(lineage_cells[[]])
+```
+
+
+Check the cell rank order for each cell type
+```{r}
+library(dplyr)
+library(ggplot2)
+
+df <- data.frame(
+  DC1 = eigenvectors(dm)[,1],
+  DC2 = eigenvectors(dm)[,2],
+  pseudotime_rank = lineage_cells$cell_rank_ordered,
+  cell_anno = lineage_cells$cell_anno
+)
+
+
+df <- df %>%
+  group_by(cell_anno) %>%
+  mutate(
+    pseudotime_within_cluster =
+      (pseudotime_rank - min(pseudotime_rank)) /
+      (max(pseudotime_rank) - min(pseudotime_rank))
+  ) %>%
+  ungroup()
+
+
+p <- ggplot(df, aes(x = DC1, y = DC2, color = pseudotime_within_cluster)) +
+  geom_point(size = 1) +
+  scale_color_gradient(
+    low = "blue",
+    high = "red",
+    name = "Within-cluster\npseudotime"
+  ) +
+  facet_wrap(~ cell_anno) +
+  theme_classic() +
+  ggtitle("Diffusion map: within-cluster pseudotime progression")
+
+p
+```
+
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("STEAM_plots/DC_plot_pseudotime_ranked_DPT_within_clusters_harmony_outlier_removed.pdf", width = 8, height = 6)  # width & height in inches
+
+p
+
+# Close PDF device
+dev.off()
+```
+
+
+
+Diffusion pseudotime in tSNE.
+```{r}
+df <- data.frame(
+  tSNE1 = Embeddings(lineage_cells, "tsne")[,1],
+  tSNE2 = Embeddings(lineage_cells, "tsne")[,2],
+  DPT = lineage_cells$DPT
+)
+
+ggplot(df, aes(x = tSNE1, y = tSNE2, color = DPT)) +
+  geom_point(size = 1) +
+  scale_color_viridis_c(option = "B") +
+  theme_classic() +
+  ggtitle("tSNE colored by pseudotime")
+
+```
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("STEAM_plots/tSNE_pseudotime_DPT_harmony_outlier_removed.pdf", width = 8, height = 6)  # width & height in inches
+
+df <- data.frame(
+  tSNE1 = Embeddings(lineage_cells, "tsne")[,1],
+  tSNE2 = Embeddings(lineage_cells, "tsne")[,2],
+  DPT = lineage_cells$DPT
+)
+
+ggplot(df, aes(x = tSNE1, y = tSNE2, color = DPT)) +
+  geom_point(size = 1) +
+  scale_color_viridis_c(option = "B") +
+  theme_classic() +
+  theme(
+    axis.title = element_text(size = 14, color = "black"),  # x and y axis titles
+    axis.text = element_text(size = 12, color = "black")                  # x and y axis tick labels
+  ) +
+  ggtitle("tSNE colored by pseudotime")
+
+# Close PDF device
+dev.off()
+```
+
+
+
+
+Diffusion pseudotime in tSNE.
+```{r}
+df <- data.frame(
+  tSNE1 = Embeddings(lineage_cells, "tsne")[,1],
+  tSNE2 = Embeddings(lineage_cells, "tsne")[,2],
+  DPT_rank = lineage_cells$cell_rank
+)
+
+ggplot(df, aes(x = tSNE1, y = tSNE2, color = DPT_rank)) +
+  geom_point(size = 1) +
+  scale_color_viridis_c(option = "B") +
+  theme_classic() +
+  ggtitle("tSNE colored by pseudotime")
+
+```
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("STEAM_plots/tSNE_pseudotime_DPT_ranked_harmony_outlier_removed.pdf", width = 8, height = 6)  # width & height in inches
+
+df <- data.frame(
+  tSNE1 = Embeddings(lineage_cells, "tsne")[,1],
+  tSNE2 = Embeddings(lineage_cells, "tsne")[,2],
+  DPT_rank = lineage_cells$cell_rank
+)
+
+ggplot(df, aes(x = tSNE1, y = tSNE2, color = DPT_rank)) +
+  geom_point(size = 1) +
+  scale_color_viridis_c(option = "B") +
+  theme_classic() +
+  theme(
+    axis.title = element_text(size = 14, color = "black"),  # x and y axis titles
+    axis.text = element_text(size = 12, color = "black")                  # x and y axis tick labels
+  ) +
+  ggtitle("tSNE colored by pseudotime")
+
+# Close PDF device
+dev.off()
+```
+
+
+
+Diffusion pseudotime in tSNE.
+```{r}
+df <- data.frame(
+  tSNE1 = Embeddings(lineage_cells, "tsne")[,1],
+  tSNE2 = Embeddings(lineage_cells, "tsne")[,2],
+  cell_rank_ordered = lineage_cells$cell_rank_ordered
+)
+
+ggplot(df, aes(x = tSNE1, y = tSNE2, color = cell_rank_ordered)) +
+  geom_point(size = 1) +
+  scale_color_viridis_c(option = "B") +
+  theme_classic() +
+  ggtitle("tSNE colored by diffusion pseudotime")
+
+```
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("STEAM_plots/tSNE_pseudotime_DPT_cell_rank_ordered_harmony_outlier_removed.pdf", width = 8, height = 6)  # width & height in inches
+
+df <- data.frame(
+  tSNE1 = Embeddings(lineage_cells, "tsne")[,1],
+  tSNE2 = Embeddings(lineage_cells, "tsne")[,2],
+  cell_rank_ordered = lineage_cells$cell_rank_ordered
+)
+
+ggplot(df, aes(x = tSNE1, y = tSNE2, color = cell_rank_ordered)) +
+  geom_point(size = 1) +
+  scale_color_viridis_c(option = "B") +
+  theme_classic() +
+  theme(
+    axis.title = element_text(size = 14, color = "black"),  # x and y axis titles
+    axis.text = element_text(size = 12, color = "black")                  # x and y axis tick labels
+  ) +
+  ggtitle("tSNE colored by pseudotime")
+
+# Close PDF device
+dev.off()
+```
+
+
+
+Diffusion map of component 1 and 2, colored by pseudotime.
+```{r}
+
+df <- data.frame(
+  DC1 = eigenvectors(dm)[,1],
+  DC2 = eigenvectors(dm)[,2],
+  DPT_rank = lineage_cells$cell_rank
+)
+
+ggplot(df, aes(x = DC1, y = DC2, color = DPT_rank)) +
+  geom_point(size = 1) +
+  scale_color_viridis_c(option = "B") +
+  theme_classic() +
+  ggtitle("Diffusion Map colored by pseudotime")
+
+```
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("STEAM_plots/DC_plot_pseudotime_DPT_ranked_harmony_outlier_removed.pdf", width = 8, height = 6)  # width & height in inches
+
+df <- data.frame(
+  DC1 = eigenvectors(dm)[,1],
+  DC2 = eigenvectors(dm)[,2],
+  DPT_rank = lineage_cells$cell_rank
+)
+
+ggplot(df, aes(x = DC1, y = DC2, color = DPT_rank)) +
+  geom_point(size = 1) +
+  scale_color_viridis_c(option = "B") +
+  theme_classic() +
+  theme(
+    axis.title = element_text(size = 14, color = "black"),  # x and y axis titles
+    axis.text = element_text(size = 12, color = "black")                  # x and y axis tick labels
+  ) +
+  ggtitle("Diffusion Map colored by pseudotime")
+
+# Close PDF device
+dev.off()
+```
+
+
+
+
+Diffusion map of component 1 and 2, colored by pseudotime.
+```{r}
+
+df <- data.frame(
+  DC1 = eigenvectors(dm)[,1],
+  DC2 = eigenvectors(dm)[,2],
+  cell_rank_ordered = lineage_cells$cell_rank_ordered
+)
+
+ggplot(df, aes(x = DC1, y = DC2, color = cell_rank_ordered)) +
+  geom_point(size = 1) +
+  scale_color_viridis_c(option = "B") +
+  theme_classic() +
+  ggtitle("Diffusion Map colored by pseudotime")
+
+```
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("STEAM_plots/DC_plot_pseudotime_DPT_cell_rank_ordered_harmony_outlier_removed.pdf", width = 8, height = 6)  # width & height in inches
+
+df <- data.frame(
+  DC1 = eigenvectors(dm)[,1],
+  DC2 = eigenvectors(dm)[,2],
+  cell_rank_ordered = lineage_cells$cell_rank_ordered
+)
+
+ggplot(df, aes(x = DC1, y = DC2, color = cell_rank_ordered)) +
+  geom_point(size = 1) +
+  scale_color_viridis_c(option = "B") +
+  theme_classic() +
+  theme(
+    axis.title = element_text(size = 14, color = "black"),  # x and y axis titles
+    axis.text = element_text(size = 12, color = "black")                  # x and y axis tick labels
+  ) +
+  ggtitle("Diffusion Map colored by pseudotime")
+
+# Close PDF device
+dev.off()
+```
+
+
+
+Save
+```{r, eval=T}
+saveRDS(lineage_cells, file = "Seurat_objects/Postnatal_human_seurat_v5_GNxEarly_filtered_trajectory_lineage_cells_harmony_no_outliers.rds")
+```
+
+
+
+<details>
+  <summary>Click to show Session Info</summary>
+
+```{r}
+sessionInfo()
+```
+
+</details>
+

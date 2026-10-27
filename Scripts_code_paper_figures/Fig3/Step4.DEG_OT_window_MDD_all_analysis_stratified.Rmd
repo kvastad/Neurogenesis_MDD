@@ -1,0 +1,1651 @@
+---
+title: "Step4.DEG_OT_window_MDD_all_analysis_stratified"
+output: 
+  rmarkdown::html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: readable
+vignette: >
+  %\VignetteIndexEntry{My Standalone Vignette}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+---
+
+# Load libraries
+
+Load the necessary libraries.
+```{r, message=FALSE, warning=FALSE}
+library(Seurat)
+library(SeuratObject)
+library(dplyr)
+library(MASS)
+library(viridis)
+library(stringr)
+library(patchwork)
+library(ggplot2)
+library(readr)
+library(STEAM)
+library(tidyr)
+library(reshape2)
+library(ggnewscale)
+#library(ComplexHeatmap)
+library(gprofiler2)
+#library(circlize)
+library(UpSetR)
+```
+
+
+
+# Load data
+
+Load Seurat object.
+```{r}
+se <- readRDS("Seurat_objects/Postnatal_human_seurat_v5_GNxEarly_filtered_trajectory_lineage_cells_harmony_no_outliers.rds")
+se
+head(se[[]])
+```
+
+
+Load ranked gene lists (here from Open Targets). Please note that it is essential for downstream analysis that the gene lists are ranked from this point forward to do empirical selection of top genetic genes.
+```{r class.source = 'fold-show'}
+
+OpenTargets_MDD_Genetic_all_ <- as.character(t(read.table(file = "data/OpenTargets/ranked_gene_sets/OT-MONDO_0002009-associated-targets-9_15_2026-v26_06_weights_genetics_only_MDD_ranked.csv")))
+length(OpenTargets_MDD_Genetic_all_)
+
+```
+
+
+Filter out genes not present in the Seurat object.
+```{r}
+# Extract gene names from the Seurat object
+gene_names <- rownames(se)
+
+# Remove genes not present in the Seurat object from the gene lists
+OpenTargets_MDD_Genetic_all_ <- unique(OpenTargets_MDD_Genetic_all_[OpenTargets_MDD_Genetic_all_ %in% gene_names])
+length(OpenTargets_MDD_Genetic_all_)
+```
+
+
+Load DEG results
+```{r, eval=T}
+DEG_genes_all <- read.table(file="DEG_output/DEG_genes_all_tested_MDD_stratified.csv", header = T, sep = ";")
+
+DEG_genes <- subset(DEG_genes_all, subset = p_val_adj <= 0.05) # using only significant DEG
+```
+
+
+
+Assign and check pseudotime windows.
+```{r}
+assign_pseudotime_windows <- function(
+  seurat_obj,
+  pseudotime_col,
+  mode = c("sliding", "stratified"),
+  window_size = NULL,          # used in sliding mode
+  windows_per_anno = NULL,     # used in stratified mode
+  cell_anno_col = NULL,        # used in stratified mode
+  output_col = "pseudotime_windows"
+) {
+  # Validate mode
+  mode <- match.arg(mode)
+
+  meta <- seurat_obj@meta.data
+  meta[[output_col]] <- NA_character_
+
+  if (mode == "sliding") {
+    # ----- Argument check -----
+    if (is.null(window_size)) stop("`window_size` must be provided when mode = 'sliding'")
+
+    # Extract pseudotime
+    pt_values <- meta[[pseudotime_col]]
+    cells <- rownames(meta)
+
+    df <- data.frame(
+      cell = cells,
+      pseudotime = pt_values,
+      stringsAsFactors = FALSE
+    )
+
+    # Order cells by pseudotime
+    df_ordered <- df[order(df$pseudotime, na.last = TRUE), , drop = FALSE]
+
+    # Non-NA pseudotime
+    non_na_idx <- which(!is.na(df_ordered$pseudotime))
+    n_non_na <- length(non_na_idx)
+
+    if (n_non_na == 0) {
+      seurat_obj@meta.data[[output_col]] <- NA
+      return(seurat_obj)
+    }
+
+    # Assign windows
+    window_ids <- ceiling(seq_len(n_non_na) / window_size)
+
+    # Merge last window if too small
+    last_window_size <- n_non_na - (max(window_ids) - 1) * window_size
+    if (last_window_size < window_size && max(window_ids) > 1) {
+      window_ids[window_ids == max(window_ids)] <- max(window_ids) - 1
+    }
+
+    # Assign labels
+    labels <- rep(NA_character_, nrow(df_ordered))
+    labels[non_na_idx] <- paste0("pt_window_", window_ids)
+    labels_by_cell <- setNames(labels, df_ordered$cell)
+    meta[[output_col]] <- labels_by_cell[rownames(meta)]
+
+  } else if (mode == "stratified") {
+    # ----- Argument check -----
+    if (is.null(windows_per_anno) || is.null(cell_anno_col)) {
+      stop("`windows_per_anno` and `cell_anno_col` must be provided when mode = 'stratified'")
+    }
+
+    current_window_id <- 1  # global counter
+
+    # Loop over each annotation
+    for (anno in names(windows_per_anno)) {
+      n_windows <- windows_per_anno[[anno]]
+
+      # Cells in this annotation with valid pseudotime
+      idx <- which(
+        meta[[cell_anno_col]] == anno &
+        !is.na(meta[[pseudotime_col]])
+      )
+
+      if (length(idx) == 0) {
+        current_window_id <- current_window_id + n_windows
+        next
+      }
+
+      # Order cells by pseudotime
+      idx_ordered <- idx[order(meta[[pseudotime_col]][idx])]
+
+      # Local window IDs
+      local_ids <- cut(
+        seq_along(idx_ordered),
+        breaks = n_windows,
+        labels = FALSE
+      )
+
+      # Map to global IDs
+      global_ids <- local_ids + current_window_id - 1
+      meta[[output_col]][idx_ordered] <- paste0("pt_window_", global_ids)
+
+      # Advance global counter
+      current_window_id <- current_window_id + n_windows
+    }
+  }
+
+  seurat_obj@meta.data <- meta
+  return(seurat_obj)
+}
+
+```
+
+
+```{r}
+se <- assign_pseudotime_windows(
+  se,
+  pseudotime_col = "cell_rank_ordered",
+  mode = "stratified",
+  cell_anno_col = "cell_anno",
+  windows_per_anno = list(NSC = 2, INP = 3, NB  = 3, YGN = 2, GN  = 3)
+)
+
+table(se$pseudotime_windows)
+```
+
+
+Plot pseudotime window assignment.
+```{r}
+#library(dplyr)
+#library(ggplot2)
+
+# Extract metadata
+meta <- se[[]]
+
+# Set colors
+cell_colors <- c(
+  "NSC" = "#FC8D62",
+  "INP" = "#E78AC3",
+  "NB"  = "#8DA0CB",
+  "YGN" = "#A6D854",
+  "GN"  = "#66C2A5"
+)
+
+# Ensure cell_rank_ordered is a factor (discrete)
+meta$cell_rank_ordered <- factor(
+  meta$cell_rank_ordered,
+  levels = sort(unique(meta$cell_rank_ordered)),
+  ordered = TRUE
+)
+
+# Ensure pseudotime windows are ordered numerically
+meta$pseudotime_windows <- factor(
+  meta$pseudotime_windows,
+  levels = paste0(
+    "pt_window_",
+    seq_len(max(
+      as.numeric(gsub("pt_window_", "", meta$pseudotime_windows)),
+      na.rm = TRUE
+    ))
+  ),
+  ordered = TRUE
+)
+
+# Count cells per type per rank and compute fractions
+plot_long <- meta %>%
+  filter(cell_anno %in% names(cell_colors)) %>%
+  count(cell_rank_ordered, cell_anno, name = "Count") %>%
+  group_by(cell_rank_ordered) %>%
+  mutate(Fraction = Count / sum(Count)) %>%
+  ungroup() %>%
+  rename(CellType = cell_anno)
+
+plot_long$CellType <- factor(plot_long$CellType, levels = names(cell_colors))
+
+# Compute window boundaries
+window_bounds <- meta %>%
+  filter(!is.na(pseudotime_windows)) %>%
+  group_by(pseudotime_windows) %>%
+  summarise(
+    start = min(as.numeric(cell_rank_ordered)),
+    end   = max(as.numeric(cell_rank_ordered)),
+    .groups = "drop"
+  ) %>%
+  arrange(start)
+
+# Vertical line positions (between windows)
+vline_positions <- window_bounds$end[-nrow(window_bounds)] + 0.5
+
+# Window label positions
+window_labels <- window_bounds %>%
+  mutate(xpos = (start + end) / 2)
+
+# X-axis breaks and labels = start of each window
+x_breaks <- window_bounds$start
+x_labels <- window_bounds$start  # numeric ticks
+
+# Plot
+ggplot(plot_long, aes(x = cell_rank_ordered, y = Fraction, fill = CellType)) +
+  geom_bar(stat = "identity", width = 1) +
+  geom_vline(
+    xintercept = vline_positions,
+    linetype = "dotted",
+    color = "black"
+  ) +
+  geom_text(
+    data = window_labels,
+    aes(x = xpos, y = 1.05, label = pseudotime_windows),
+    inherit.aes = FALSE,
+    angle = 90,
+    hjust = 0,
+    vjust = 0,
+    size = 4
+  ) +
+  scale_fill_manual(values = cell_colors) +
+  labs(
+    x = "Cell rank",
+    y = "Fraction of cells",
+    title = "Cell type composition along trajectory with pseudotime windows"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.5))) +
+  scale_x_discrete(
+    breaks = levels(meta$cell_rank_ordered)[x_breaks],
+    labels = x_labels
+  ) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+```
+
+
+# Gene set scores
+
+```{r}
+find_OT_genes_per_window <- function(DEG_genes, OT_genes) {
+  
+  # extract numeric window index
+  window_df <- data.frame(
+    cluster = unique(DEG_genes$cluster),
+    window_num = as.integer(sub("pt_window_", "", unique(DEG_genes$cluster)))
+  )
+  
+  # order windows numerically
+  window_df <- window_df[order(window_df$window_num), ]
+  windows <- window_df$cluster
+  
+  # keep only DEG rows where gene is in OpenTargets list
+  hits <- DEG_genes[DEG_genes$gene %in% OT_genes, ]
+  
+  # build ordered output list
+  result <- lapply(windows, function(w) {
+    genes <- unique(hits$gene[hits$cluster == w])
+    if (length(genes) == 0) NA else genes
+  })
+  
+  names(result) <- windows
+  
+  return(result)
+}
+
+```
+
+
+```{r}
+OT_by_window <- find_OT_genes_per_window(
+  DEG_genes = DEG_genes,
+  OT_genes  = OpenTargets_MDD_Genetic_all_
+)
+
+OT_by_window
+
+```
+
+
+Calculate gene set scores for each window.
+```{r}
+all_gene_sets <- OT_by_window
+
+score.mat <- matrix(
+  data = NA,
+  nrow = length(all_gene_sets),
+  ncol = 1,
+  dimnames = list(names(all_gene_sets), "% of genes present")
+)
+
+
+for (i in seq_along(all_gene_sets)) {
+  
+  genes <- all_gene_sets[[i]]
+  
+  # case: no overlapping genes
+  if (length(genes) == 1 && is.na(genes)) {
+    score.mat[i, 1] <- 0
+    next
+  }
+  
+  # % of genes present in Seurat object
+  score.mat[i, 1] <- mean(genes %in% rownames(se))
+  
+  # add module score
+  se <- AddModuleScore(
+    object = se,
+    features = list(genes),
+    ctrl = 100,
+    name     = paste0(names(all_gene_sets)[i], "_")
+  )
+}
+
+
+score.mat * 100
+```
+
+
+```{r, warning=FALSE,fig.height=5,fig.height=7}
+update_factor_order <- paste0("pt_window_", 1:length(table(se$pseudotime_windows)))
+se$pseudotime_windows <- factor(se$pseudotime_windows, levels = update_factor_order)
+
+
+VlnPlot(se, features = c("pt_window_1_1"), group.by = "pseudotime_windows")
+VlnPlot(se, features = c("pt_window_2_1"), group.by = "pseudotime_windows")
+VlnPlot(se, features = c("pt_window_3_1"), group.by = "pseudotime_windows")
+VlnPlot(se, features = c("pt_window_4_1"), group.by = "pseudotime_windows")
+VlnPlot(se, features = c("pt_window_5_1"), group.by = "pseudotime_windows")
+VlnPlot(se, features = c("pt_window_6_1"), group.by = "pseudotime_windows")
+VlnPlot(se, features = c("pt_window_7_1"), group.by = "pseudotime_windows")
+VlnPlot(se, features = c("pt_window_8_1"), group.by = "pseudotime_windows")
+VlnPlot(se, features = c("pt_window_9_1"), group.by = "pseudotime_windows")
+VlnPlot(se, features = c("pt_window_10_1"), group.by = "pseudotime_windows")
+VlnPlot(se, features = c("pt_window_11_1"), group.by = "pseudotime_windows")
+VlnPlot(se, features = c("pt_window_12_1"), group.by = "pseudotime_windows")
+VlnPlot(se, features = c("pt_window_13_1"), group.by = "pseudotime_windows")
+```
+
+
+
+# g:Profiler
+
+## window_1
+
+```{r}
+# Subset DEGs for the cluster of interest
+cluster_window_1 <- DEG_genes[DEG_genes$cluster == "pt_window_1", ]
+  
+# Identify genetically associated genes
+cluster_window_1$Genetically_Associated <- cluster_window_1$gene %in% OpenTargets_MDD_Genetic_all_
+
+# A: Genetically associated & DE
+genetically_associated_DE_genes_window_1 <- cluster_window_1[cluster_window_1$Genetically_Associated == TRUE, ]
+
+# Print the genes that are both genetically associated and differentially expressed
+print("Genes that are genetically associated and DE for pt_window_1:")
+print(genetically_associated_DE_genes_window_1$gene)
+
+Genes_window_1 <- genetically_associated_DE_genes_window_1$gene
+```
+
+
+Make sure that Genes_window_1 is ordered in the order of smallest p_val_adj 
+```{r}
+DEG_genes_window_1 <- subset(DEG_genes, cluster == "pt_window_1" )
+
+DEG_genes_window_1 <- DEG_genes_window_1 %>%
+  arrange(p_val_adj)
+
+Genes_window_1_ordered <- Genes_window_1[order(match(Genes_window_1, DEG_genes_window_1))]
+Genes_window_1_ordered
+length(Genes_window_1_ordered)
+```
+
+
+GO analysis
+```{r}
+gostres <- gost(query = Genes_window_1_ordered, 
+                organism = "hsapiens", ordered_query = TRUE, # Biological processes
+                multi_query = FALSE, significant = T, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = T, 
+                user_threshold = 0.05, correction_method = "g_SCS", 
+                domain_scope = "annotated", custom_bg = NULL, 
+                numeric_ns = "", sources = NULL, as_short_link = FALSE)
+
+```
+
+
+```{r}
+gostplot(gostres, capped = TRUE, interactive = F)
+```
+
+
+```{r}
+results <- gostres$result
+results <- results[grep("GO:BP",results$source), ]
+results <- arrange(results,p_value)
+```
+
+Save GO results
+```{r, eval=T}
+write_delim(results, "DEG_output/GO_analysis/GO_Genes_MDD_all_stratified_pt_window_1.csv", delim = ";")
+```
+
+
+```{r}
+
+results_plot <- na.omit(results[1:20,])
+
+p <- ggplot() +
+  geom_point(
+    data = results_plot, 
+    aes(
+      x = reorder(term_name, -log10(p_value)), 
+      y = -log10(p_value),
+      size = intersection_size/term_size  # map size
+    ), 
+    color = "grey50",  # outline color
+    fill = "grey70",   # fill color (uniform)
+    shape = 21
+  ) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    x = "GO:BP", 
+    y = "-log10(adj.p-value)", 
+    size = "GeneRatio"
+  ) +
+  ggtitle("MDD: window_1", subtitle = "Top 20") +
+  guides(fill = "none")  # remove fill legend if still present
+
+cowplot::plot_grid(p, ncol = 1)
+```
+
+
+
+## window_2
+
+```{r}
+# Subset DEGs for the cluster of interest
+cluster_window_2 <- DEG_genes[DEG_genes$cluster == "pt_window_2", ]
+  
+# Identify genetically associated genes
+cluster_window_2$Genetically_Associated <- cluster_window_2$gene %in% OpenTargets_MDD_Genetic_all_
+
+# A: Genetically associated & DE
+genetically_associated_DE_genes_window_2 <- cluster_window_2[cluster_window_2$Genetically_Associated == TRUE, ]
+
+# Print the genes that are both genetically associated and differentially expressed
+print("Genes that are genetically associated and DE for pt_window_2:")
+print(genetically_associated_DE_genes_window_2$gene)
+
+Genes_window_2 <- genetically_associated_DE_genes_window_2$gene
+```
+
+
+Make sure that Genes_window_2 is ordered in the order of smallest p_val_adj 
+```{r}
+DEG_genes_window_2 <- subset(DEG_genes, cluster == "pt_window_2" )
+
+DEG_genes_window_2 <- DEG_genes_window_2 %>%
+  arrange(p_val_adj)
+
+Genes_window_2_ordered <- Genes_window_2[order(match(Genes_window_2, DEG_genes_window_2))]
+Genes_window_2_ordered
+length(Genes_window_2_ordered)
+```
+
+
+GO analysis
+```{r}
+gostres <- gost(query = Genes_window_2_ordered, 
+                organism = "hsapiens", ordered_query = TRUE, # Biological processes
+                multi_query = FALSE, significant = T, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = T, 
+                user_threshold = 0.05, correction_method = "g_SCS", 
+                domain_scope = "annotated", custom_bg = NULL, 
+                numeric_ns = "", sources = NULL, as_short_link = FALSE)
+
+```
+
+
+```{r}
+gostplot(gostres, capped = TRUE, interactive = F)
+```
+
+
+```{r}
+results <- gostres$result
+results <- results[grep("GO:BP",results$source), ]
+results <- arrange(results,p_value)
+```
+
+Save GO results
+```{r, eval=T}
+write_delim(results, "DEG_output/GO_analysis/GO_Genes_MDD_all_stratified_pt_window_2.csv", delim = ";")
+```
+
+
+```{r}
+
+results_plot <- na.omit(results[1:20,])
+
+p <- ggplot() +
+  geom_point(
+    data = results_plot, 
+    aes(
+      x = reorder(term_name, -log10(p_value)), 
+      y = -log10(p_value),
+      size = intersection_size/term_size  # map size
+    ), 
+    color = "grey50",  # outline color
+    fill = "grey70",   # fill color (uniform)
+    shape = 21
+  ) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    x = "GO:BP", 
+    y = "-log10(adj.p-value)", 
+    size = "GeneRatio"
+  ) +
+  ggtitle("MDD: window_2", subtitle = "Top 20") +
+  guides(fill = "none")  # remove fill legend if still present
+
+cowplot::plot_grid(p, ncol = 1)
+```
+
+
+
+## window_3
+
+```{r}
+# Subset DEGs for the cluster of interest
+cluster_window_3 <- DEG_genes[DEG_genes$cluster == "pt_window_3", ]
+  
+# Identify genetically associated genes
+cluster_window_3$Genetically_Associated <- cluster_window_3$gene %in% OpenTargets_MDD_Genetic_all_
+
+# A: Genetically associated & DE
+genetically_associated_DE_genes_window_3 <- cluster_window_3[cluster_window_3$Genetically_Associated == TRUE, ]
+
+# Print the genes that are both genetically associated and differentially expressed
+print("Genes that are genetically associated and DE for pt_window_3:")
+print(genetically_associated_DE_genes_window_3$gene)
+
+Genes_window_3 <- genetically_associated_DE_genes_window_3$gene
+```
+
+
+Make sure that Genes_window_3 is ordered in the order of smallest p_val_adj 
+```{r}
+DEG_genes_window_3 <- subset(DEG_genes, cluster == "pt_window_3" )
+
+DEG_genes_window_3 <- DEG_genes_window_3 %>%
+  arrange(p_val_adj)
+
+Genes_window_3_ordered <- Genes_window_3[order(match(Genes_window_3, DEG_genes_window_3))]
+Genes_window_3_ordered
+length(Genes_window_3_ordered)
+```
+
+
+GO analysis
+```{r}
+gostres <- gost(query = Genes_window_3_ordered, 
+                organism = "hsapiens", ordered_query = TRUE, # Biological processes
+                multi_query = FALSE, significant = T, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = T, 
+                user_threshold = 0.05, correction_method = "g_SCS", 
+                domain_scope = "annotated", custom_bg = NULL, 
+                numeric_ns = "", sources = NULL, as_short_link = FALSE)
+
+```
+
+
+```{r}
+gostplot(gostres, capped = TRUE, interactive = F)
+```
+
+
+```{r}
+results <- gostres$result
+results <- results[grep("GO:BP",results$source), ]
+results <- arrange(results,p_value)
+```
+
+Save GO results
+```{r, eval=T}
+write_delim(results, "DEG_output/GO_analysis/GO_Genes_MDD_all_stratified_pt_window_3.csv", delim = ";")
+```
+
+
+```{r}
+
+results_plot <- na.omit(results[1:20,])
+
+p <- ggplot() +
+  geom_point(
+    data = results_plot, 
+    aes(
+      x = reorder(term_name, -log10(p_value)), 
+      y = -log10(p_value),
+      size = intersection_size/term_size  # map size
+    ), 
+    color = "grey50",  # outline color
+    fill = "grey70",   # fill color (uniform)
+    shape = 21
+  ) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    x = "GO:BP", 
+    y = "-log10(adj.p-value)", 
+    size = "GeneRatio"
+  ) +
+  ggtitle("MDD: window_3", subtitle = "Top 20") +
+  guides(fill = "none")  # remove fill legend if still present
+
+cowplot::plot_grid(p, ncol = 1)
+```
+
+
+
+## window_4
+
+```{r}
+# Subset DEGs for the cluster of interest
+cluster_window_4 <- DEG_genes[DEG_genes$cluster == "pt_window_4", ]
+  
+# Identify genetically associated genes
+cluster_window_4$Genetically_Associated <- cluster_window_4$gene %in% OpenTargets_MDD_Genetic_all_
+
+# A: Genetically associated & DE
+genetically_associated_DE_genes_window_4 <- cluster_window_4[cluster_window_4$Genetically_Associated == TRUE, ]
+
+# Print the genes that are both genetically associated and differentially expressed
+print("Genes that are genetically associated and DE for pt_window_4:")
+print(genetically_associated_DE_genes_window_4$gene)
+
+Genes_window_4 <- genetically_associated_DE_genes_window_4$gene
+```
+
+
+Make sure that Genes_window_4 is ordered in the order of smallest p_val_adj 
+```{r}
+DEG_genes_window_4 <- subset(DEG_genes, cluster == "pt_window_4" )
+
+DEG_genes_window_4 <- DEG_genes_window_4 %>%
+  arrange(p_val_adj)
+
+Genes_window_4_ordered <- Genes_window_4[order(match(Genes_window_4, DEG_genes_window_4))]
+Genes_window_4_ordered
+length(Genes_window_4_ordered)
+```
+
+
+GO analysis
+```{r}
+gostres <- gost(query = Genes_window_4_ordered, 
+                organism = "hsapiens", ordered_query = TRUE, # Biological processes
+                multi_query = FALSE, significant = T, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = T, 
+                user_threshold = 0.05, correction_method = "g_SCS", 
+                domain_scope = "annotated", custom_bg = NULL, 
+                numeric_ns = "", sources = NULL, as_short_link = FALSE)
+
+```
+
+
+```{r}
+gostplot(gostres, capped = TRUE, interactive = F)
+```
+
+
+```{r}
+results <- gostres$result
+results <- results[grep("GO:BP",results$source), ]
+results <- arrange(results,p_value)
+```
+
+Save GO results
+```{r, eval=T}
+write_delim(results, "DEG_output/GO_analysis/GO_Genes_MDD_all_stratified_pt_window_4.csv", delim = ";")
+```
+
+
+```{r}
+
+results_plot <- na.omit(results[1:20,])
+
+p <- ggplot() +
+  geom_point(
+    data = results_plot, 
+    aes(
+      x = reorder(term_name, -log10(p_value)), 
+      y = -log10(p_value),
+      size = intersection_size/term_size  # map size
+    ), 
+    color = "grey50",  # outline color
+    fill = "grey70",   # fill color (uniform)
+    shape = 21
+  ) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    x = "GO:BP", 
+    y = "-log10(adj.p-value)", 
+    size = "GeneRatio"
+  ) +
+  ggtitle("MDD: window_4", subtitle = "Top 20") +
+  guides(fill = "none")  # remove fill legend if still present
+
+cowplot::plot_grid(p, ncol = 1)
+```
+
+
+
+
+## window_5
+
+```{r}
+# Subset DEGs for the cluster of interest
+cluster_window_5 <- DEG_genes[DEG_genes$cluster == "pt_window_5", ]
+  
+# Identify genetically associated genes
+cluster_window_5$Genetically_Associated <- cluster_window_5$gene %in% OpenTargets_MDD_Genetic_all_
+
+# A: Genetically associated & DE
+genetically_associated_DE_genes_window_5 <- cluster_window_5[cluster_window_5$Genetically_Associated == TRUE, ]
+
+# Print the genes that are both genetically associated and differentially expressed
+print("Genes that are genetically associated and DE for pt_window_5:")
+print(genetically_associated_DE_genes_window_5$gene)
+
+Genes_window_5 <- genetically_associated_DE_genes_window_5$gene
+```
+
+
+Make sure that Genes_window_5 is ordered in the order of smallest p_val_adj 
+```{r}
+DEG_genes_window_5 <- subset(DEG_genes, cluster == "pt_window_5" )
+
+DEG_genes_window_5 <- DEG_genes_window_5 %>%
+  arrange(p_val_adj)
+
+Genes_window_5_ordered <- Genes_window_5[order(match(Genes_window_5, DEG_genes_window_5))]
+Genes_window_5_ordered
+length(Genes_window_5_ordered)
+```
+
+
+GO analysis
+```{r}
+gostres <- gost(query = Genes_window_5_ordered, 
+                organism = "hsapiens", ordered_query = TRUE, # Biological processes
+                multi_query = FALSE, significant = T, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = T, 
+                user_threshold = 0.05, correction_method = "g_SCS", 
+                domain_scope = "annotated", custom_bg = NULL, 
+                numeric_ns = "", sources = NULL, as_short_link = FALSE)
+
+```
+
+
+```{r}
+gostplot(gostres, capped = TRUE, interactive = F)
+```
+
+
+```{r}
+results <- gostres$result
+results <- results[grep("GO:BP",results$source), ]
+results <- arrange(results,p_value)
+```
+
+Save GO results
+```{r, eval=T}
+write_delim(results, "DEG_output/GO_analysis/GO_Genes_MDD_all_stratified_pt_window_5.csv", delim = ";")
+```
+
+
+```{r}
+
+results_plot <- na.omit(results[1:20,])
+
+p <- ggplot() +
+  geom_point(
+    data = results_plot, 
+    aes(
+      x = reorder(term_name, -log10(p_value)), 
+      y = -log10(p_value),
+      size = intersection_size/term_size  # map size
+    ), 
+    color = "grey50",  # outline color
+    fill = "grey70",   # fill color (uniform)
+    shape = 21
+  ) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    x = "GO:BP", 
+    y = "-log10(adj.p-value)", 
+    size = "GeneRatio"
+  ) +
+  ggtitle("MDD: window_5", subtitle = "Top 20") +
+  guides(fill = "none")  # remove fill legend if still present
+
+cowplot::plot_grid(p, ncol = 1)
+```
+
+
+
+
+## window_6
+
+```{r}
+# Subset DEGs for the cluster of interest
+cluster_window_6 <- DEG_genes[DEG_genes$cluster == "pt_window_6", ]
+  
+# Identify genetically associated genes
+cluster_window_6$Genetically_Associated <- cluster_window_6$gene %in% OpenTargets_MDD_Genetic_all_
+
+# A: Genetically associated & DE
+genetically_associated_DE_genes_window_6 <- cluster_window_6[cluster_window_6$Genetically_Associated == TRUE, ]
+
+# Print the genes that are both genetically associated and differentially expressed
+print("Genes that are genetically associated and DE for pt_window_6:")
+print(genetically_associated_DE_genes_window_6$gene)
+
+Genes_window_6 <- genetically_associated_DE_genes_window_6$gene
+```
+
+
+Make sure that Genes_window_6 is ordered in the order of smallest p_val_adj 
+```{r}
+DEG_genes_window_6 <- subset(DEG_genes, cluster == "pt_window_6" )
+
+DEG_genes_window_6 <- DEG_genes_window_6 %>%
+  arrange(p_val_adj)
+
+Genes_window_6_ordered <- Genes_window_6[order(match(Genes_window_6, DEG_genes_window_6))]
+Genes_window_6_ordered
+length(Genes_window_6_ordered)
+```
+
+
+GO analysis
+```{r}
+gostres <- gost(query = Genes_window_6_ordered, 
+                organism = "hsapiens", ordered_query = TRUE, # Biological processes
+                multi_query = FALSE, significant = T, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = T, 
+                user_threshold = 0.05, correction_method = "g_SCS", 
+                domain_scope = "annotated", custom_bg = NULL, 
+                numeric_ns = "", sources = NULL, as_short_link = FALSE)
+
+```
+
+
+```{r}
+gostplot(gostres, capped = TRUE, interactive = F)
+```
+
+
+```{r}
+results <- gostres$result
+results <- results[grep("GO:BP",results$source), ]
+results <- arrange(results,p_value)
+```
+
+Save GO results
+```{r, eval=T}
+write_delim(results, "DEG_output/GO_analysis/GO_Genes_MDD_all_stratified_pt_window_6.csv", delim = ";")
+```
+
+
+```{r}
+
+results_plot <- na.omit(results[1:20,])
+
+p <- ggplot() +
+  geom_point(
+    data = results_plot, 
+    aes(
+      x = reorder(term_name, -log10(p_value)), 
+      y = -log10(p_value),
+      size = intersection_size/term_size  # map size
+    ), 
+    color = "grey50",  # outline color
+    fill = "grey70",   # fill color (uniform)
+    shape = 21
+  ) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    x = "GO:BP", 
+    y = "-log10(adj.p-value)", 
+    size = "GeneRatio"
+  ) +
+  ggtitle("MDD: window_6", subtitle = "Top 20") +
+  guides(fill = "none")  # remove fill legend if still present
+
+cowplot::plot_grid(p, ncol = 1)
+```
+
+
+
+
+## window_7
+
+```{r}
+# Subset DEGs for the cluster of interest
+cluster_window_7 <- DEG_genes[DEG_genes$cluster == "pt_window_7", ]
+  
+# Identify genetically associated genes
+cluster_window_7$Genetically_Associated <- cluster_window_7$gene %in% OpenTargets_MDD_Genetic_all_
+
+# A: Genetically associated & DE
+genetically_associated_DE_genes_window_7 <- cluster_window_7[cluster_window_7$Genetically_Associated == TRUE, ]
+
+# Print the genes that are both genetically associated and differentially expressed
+print("Genes that are genetically associated and DE for pt_window_7:")
+print(genetically_associated_DE_genes_window_7$gene)
+
+Genes_window_7 <- genetically_associated_DE_genes_window_7$gene
+```
+
+
+Make sure that Genes_window_7 is ordered in the order of smallest p_val_adj 
+```{r}
+DEG_genes_window_7 <- subset(DEG_genes, cluster == "pt_window_7" )
+
+DEG_genes_window_7 <- DEG_genes_window_7 %>%
+  arrange(p_val_adj)
+
+Genes_window_7_ordered <- Genes_window_7[order(match(Genes_window_7, DEG_genes_window_7))]
+Genes_window_7_ordered
+length(Genes_window_7_ordered)
+```
+
+
+GO analysis
+```{r}
+gostres <- gost(query = Genes_window_7_ordered, 
+                organism = "hsapiens", ordered_query = TRUE, # Biological processes
+                multi_query = FALSE, significant = T, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = T, 
+                user_threshold = 0.05, correction_method = "g_SCS", 
+                domain_scope = "annotated", custom_bg = NULL, 
+                numeric_ns = "", sources = NULL, as_short_link = FALSE)
+
+```
+
+
+```{r}
+gostplot(gostres, capped = TRUE, interactive = F)
+```
+
+
+```{r}
+results <- gostres$result
+results <- results[grep("GO:BP",results$source), ]
+results <- arrange(results,p_value)
+```
+
+Save GO results
+```{r, eval=T}
+write_delim(results, "DEG_output/GO_analysis/GO_Genes_MDD_all_stratified_pt_window_7.csv", delim = ";")
+```
+
+
+```{r}
+
+results_plot <- na.omit(results[1:20,])
+
+p <- ggplot() +
+  geom_point(
+    data = results_plot, 
+    aes(
+      x = reorder(term_name, -log10(p_value)), 
+      y = -log10(p_value),
+      size = intersection_size/term_size  # map size
+    ), 
+    color = "grey50",  # outline color
+    fill = "grey70",   # fill color (uniform)
+    shape = 21
+  ) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    x = "GO:BP", 
+    y = "-log10(adj.p-value)", 
+    size = "GeneRatio"
+  ) +
+  ggtitle("MDD: window_7", subtitle = "Top 20") +
+  guides(fill = "none")  # remove fill legend if still present
+
+cowplot::plot_grid(p, ncol = 1)
+```
+
+
+
+## window_8
+
+```{r}
+# Subset DEGs for the cluster of interest
+cluster_window_8 <- DEG_genes[DEG_genes$cluster == "pt_window_8", ]
+  
+# Identify genetically associated genes
+cluster_window_8$Genetically_Associated <- cluster_window_8$gene %in% OpenTargets_MDD_Genetic_all_
+
+# A: Genetically associated & DE
+genetically_associated_DE_genes_window_8 <- cluster_window_8[cluster_window_8$Genetically_Associated == TRUE, ]
+
+# Print the genes that are both genetically associated and differentially expressed
+print("Genes that are genetically associated and DE for pt_window_8:")
+print(genetically_associated_DE_genes_window_8$gene)
+
+Genes_window_8 <- genetically_associated_DE_genes_window_8$gene
+```
+
+
+Make sure that Genes_window_8 is ordered in the order of smallest p_val_adj 
+```{r}
+DEG_genes_window_8 <- subset(DEG_genes, cluster == "pt_window_8" )
+
+DEG_genes_window_8 <- DEG_genes_window_8 %>%
+  arrange(p_val_adj)
+
+Genes_window_8_ordered <- Genes_window_8[order(match(Genes_window_8, DEG_genes_window_8))]
+Genes_window_8_ordered
+length(Genes_window_8_ordered)
+```
+
+
+GO analysis
+```{r}
+gostres <- gost(query = Genes_window_8_ordered, 
+                organism = "hsapiens", ordered_query = TRUE, # Biological processes
+                multi_query = FALSE, significant = T, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = T, 
+                user_threshold = 0.05, correction_method = "g_SCS", 
+                domain_scope = "annotated", custom_bg = NULL, 
+                numeric_ns = "", sources = NULL, as_short_link = FALSE)
+
+```
+
+
+```{r}
+gostplot(gostres, capped = TRUE, interactive = F)
+```
+
+
+```{r}
+results <- gostres$result
+results <- results[grep("GO:BP",results$source), ]
+results <- arrange(results,p_value)
+```
+
+Save GO results
+```{r, eval=T}
+write_delim(results, "DEG_output/GO_analysis/GO_Genes_MDD_all_stratified_pt_window_8.csv", delim = ";")
+```
+
+
+```{r}
+
+results_plot <- na.omit(results[1:20,])
+
+p <- ggplot() +
+  geom_point(
+    data = results_plot, 
+    aes(
+      x = reorder(term_name, -log10(p_value)), 
+      y = -log10(p_value),
+      size = intersection_size/term_size  # map size
+    ), 
+    color = "grey50",  # outline color
+    fill = "grey70",   # fill color (uniform)
+    shape = 21
+  ) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    x = "GO:BP", 
+    y = "-log10(adj.p-value)", 
+    size = "GeneRatio"
+  ) +
+  ggtitle("MDD: window_8", subtitle = "Top 20") +
+  guides(fill = "none")  # remove fill legend if still present
+
+cowplot::plot_grid(p, ncol = 1)
+```
+
+
+
+## window_9
+
+```{r}
+# Subset DEGs for the cluster of interest
+cluster_window_9 <- DEG_genes[DEG_genes$cluster == "pt_window_9", ]
+  
+# Identify genetically associated genes
+cluster_window_9$Genetically_Associated <- cluster_window_9$gene %in% OpenTargets_MDD_Genetic_all_
+
+# A: Genetically associated & DE
+genetically_associated_DE_genes_window_9 <- cluster_window_9[cluster_window_9$Genetically_Associated == TRUE, ]
+
+# Print the genes that are both genetically associated and differentially expressed
+print("Genes that are genetically associated and DE for pt_window_9:")
+print(genetically_associated_DE_genes_window_9$gene)
+
+Genes_window_9 <- genetically_associated_DE_genes_window_9$gene
+```
+
+
+Make sure that Genes_window_9 is ordered in the order of smallest p_val_adj 
+```{r}
+DEG_genes_window_9 <- subset(DEG_genes, cluster == "pt_window_9" )
+
+DEG_genes_window_9 <- DEG_genes_window_9 %>%
+  arrange(p_val_adj)
+
+Genes_window_9_ordered <- Genes_window_9[order(match(Genes_window_9, DEG_genes_window_9))]
+Genes_window_9_ordered
+length(Genes_window_9_ordered)
+```
+
+
+GO analysis
+```{r}
+gostres <- gost(query = Genes_window_9_ordered, 
+                organism = "hsapiens", ordered_query = TRUE, # Biological processes
+                multi_query = FALSE, significant = T, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = T, 
+                user_threshold = 0.05, correction_method = "g_SCS", 
+                domain_scope = "annotated", custom_bg = NULL, 
+                numeric_ns = "", sources = NULL, as_short_link = FALSE)
+
+```
+
+
+```{r}
+gostplot(gostres, capped = TRUE, interactive = F)
+```
+
+
+```{r}
+results <- gostres$result
+results <- results[grep("GO:BP",results$source), ]
+results <- arrange(results,p_value)
+```
+
+Save GO results
+```{r, eval=T}
+write_delim(results, "DEG_output/GO_analysis/GO_Genes_MDD_all_stratified_pt_window_9.csv", delim = ";")
+```
+
+
+```{r}
+
+results_plot <- na.omit(results[1:20,])
+
+p <- ggplot() +
+  geom_point(
+    data = results_plot, 
+    aes(
+      x = reorder(term_name, -log10(p_value)), 
+      y = -log10(p_value),
+      size = intersection_size/term_size  # map size
+    ), 
+    color = "grey50",  # outline color
+    fill = "grey70",   # fill color (uniform)
+    shape = 21
+  ) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    x = "GO:BP", 
+    y = "-log10(adj.p-value)", 
+    size = "GeneRatio"
+  ) +
+  ggtitle("MDD: window_9", subtitle = "Top 20") +
+  guides(fill = "none")  # remove fill legend if still present
+
+cowplot::plot_grid(p, ncol = 1)
+```
+
+
+
+
+
+## window_10
+
+```{r}
+# Subset DEGs for the cluster of interest
+cluster_window_10 <- DEG_genes[DEG_genes$cluster == "pt_window_10", ]
+  
+# Identify genetically associated genes
+cluster_window_10$Genetically_Associated <- cluster_window_10$gene %in% OpenTargets_MDD_Genetic_all_
+
+# A: Genetically associated & DE
+genetically_associated_DE_genes_window_10 <- cluster_window_10[cluster_window_10$Genetically_Associated == TRUE, ]
+
+# Print the genes that are both genetically associated and differentially expressed
+print("Genes that are genetically associated and DE for pt_window_10:")
+print(genetically_associated_DE_genes_window_10$gene)
+
+Genes_window_10 <- genetically_associated_DE_genes_window_10$gene
+```
+
+
+Make sure that Genes_window_10 is ordered in the order of smallest p_val_adj 
+```{r}
+DEG_genes_window_10 <- subset(DEG_genes, cluster == "pt_window_10" )
+
+DEG_genes_window_10 <- DEG_genes_window_10 %>%
+  arrange(p_val_adj)
+
+Genes_window_10_ordered <- Genes_window_10[order(match(Genes_window_10, DEG_genes_window_10))]
+Genes_window_10_ordered
+length(Genes_window_10_ordered)
+```
+
+
+GO analysis
+```{r}
+gostres <- gost(query = Genes_window_10_ordered, 
+                organism = "hsapiens", ordered_query = TRUE, # Biological processes
+                multi_query = FALSE, significant = T, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = T, 
+                user_threshold = 0.05, correction_method = "g_SCS", 
+                domain_scope = "annotated", custom_bg = NULL, 
+                numeric_ns = "", sources = NULL, as_short_link = FALSE)
+
+```
+
+
+```{r}
+gostplot(gostres, capped = TRUE, interactive = F)
+```
+
+
+```{r}
+results <- gostres$result
+results <- results[grep("GO:BP",results$source), ]
+results <- arrange(results,p_value)
+```
+
+Save GO results
+```{r, eval=T}
+write_delim(results, "DEG_output/GO_analysis/GO_Genes_MDD_all_stratified_pt_window_10.csv", delim = ";")
+```
+
+
+```{r}
+
+results_plot <- na.omit(results[1:20,])
+
+p <- ggplot() +
+  geom_point(
+    data = results_plot, 
+    aes(
+      x = reorder(term_name, -log10(p_value)), 
+      y = -log10(p_value),
+      size = intersection_size/term_size  # map size
+    ), 
+    color = "grey50",  # outline color
+    fill = "grey70",   # fill color (uniform)
+    shape = 21
+  ) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    x = "GO:BP", 
+    y = "-log10(adj.p-value)", 
+    size = "GeneRatio"
+  ) +
+  ggtitle("MDD: window_10", subtitle = "Top 20") +
+  guides(fill = "none")  # remove fill legend if still present
+
+cowplot::plot_grid(p, ncol = 1)
+```
+
+
+
+## window_11
+
+```{r}
+# Subset DEGs for the cluster of interest
+cluster_window_11 <- DEG_genes[DEG_genes$cluster == "pt_window_11", ]
+  
+# Identify genetically associated genes
+cluster_window_11$Genetically_Associated <- cluster_window_11$gene %in% OpenTargets_MDD_Genetic_all_
+
+# A: Genetically associated & DE
+genetically_associated_DE_genes_window_11 <- cluster_window_11[cluster_window_11$Genetically_Associated == TRUE, ]
+
+# Print the genes that are both genetically associated and differentially expressed
+print("Genes that are genetically associated and DE for pt_window_11:")
+print(genetically_associated_DE_genes_window_11$gene)
+
+Genes_window_11 <- genetically_associated_DE_genes_window_11$gene
+```
+
+
+Make sure that Genes_window_11 is ordered in the order of smallest p_val_adj 
+```{r}
+DEG_genes_window_11 <- subset(DEG_genes, cluster == "pt_window_11" )
+
+DEG_genes_window_11 <- DEG_genes_window_11 %>%
+  arrange(p_val_adj)
+
+Genes_window_11_ordered <- Genes_window_11[order(match(Genes_window_11, DEG_genes_window_11))]
+Genes_window_11_ordered
+length(Genes_window_11_ordered)
+```
+
+
+GO analysis
+```{r}
+gostres <- gost(query = Genes_window_11_ordered, 
+                organism = "hsapiens", ordered_query = TRUE, # Biological processes
+                multi_query = FALSE, significant = T, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = T, 
+                user_threshold = 0.05, correction_method = "g_SCS", 
+                domain_scope = "annotated", custom_bg = NULL, 
+                numeric_ns = "", sources = NULL, as_short_link = FALSE)
+
+```
+
+
+```{r}
+gostplot(gostres, capped = TRUE, interactive = F)
+```
+
+
+```{r}
+results <- gostres$result
+results <- results[grep("GO:BP",results$source), ]
+results <- arrange(results,p_value)
+```
+
+Save GO results
+```{r, eval=T}
+write_delim(results, "DEG_output/GO_analysis/GO_Genes_MDD_all_stratified_pt_window_11.csv", delim = ";")
+```
+
+
+```{r}
+
+results_plot <- na.omit(results[1:20,])
+
+p <- ggplot() +
+  geom_point(
+    data = results_plot, 
+    aes(
+      x = reorder(term_name, -log10(p_value)), 
+      y = -log10(p_value),
+      size = intersection_size/term_size  # map size
+    ), 
+    color = "grey50",  # outline color
+    fill = "grey70",   # fill color (uniform)
+    shape = 21
+  ) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    x = "GO:BP", 
+    y = "-log10(adj.p-value)", 
+    size = "GeneRatio"
+  ) +
+  ggtitle("MDD: window_11", subtitle = "Top 20") +
+  guides(fill = "none")  # remove fill legend if still present
+
+cowplot::plot_grid(p, ncol = 1)
+```
+
+
+
+
+## window_12
+
+```{r}
+# Subset DEGs for the cluster of interest
+cluster_window_12 <- DEG_genes[DEG_genes$cluster == "pt_window_12", ]
+  
+# Identify genetically associated genes
+cluster_window_12$Genetically_Associated <- cluster_window_12$gene %in% OpenTargets_MDD_Genetic_all_
+
+# A: Genetically associated & DE
+genetically_associated_DE_genes_window_12 <- cluster_window_12[cluster_window_12$Genetically_Associated == TRUE, ]
+
+# Print the genes that are both genetically associated and differentially expressed
+print("Genes that are genetically associated and DE for pt_window_12:")
+print(genetically_associated_DE_genes_window_12$gene)
+
+Genes_window_12 <- genetically_associated_DE_genes_window_12$gene
+```
+
+
+Make sure that Genes_window_12 is ordered in the order of smallest p_val_adj 
+```{r}
+DEG_genes_window_12 <- subset(DEG_genes, cluster == "pt_window_12" )
+
+DEG_genes_window_12 <- DEG_genes_window_12 %>%
+  arrange(p_val_adj)
+
+Genes_window_12_ordered <- Genes_window_12[order(match(Genes_window_12, DEG_genes_window_12))]
+Genes_window_12_ordered
+length(Genes_window_12_ordered)
+```
+
+
+GO analysis
+```{r}
+gostres <- gost(query = Genes_window_12_ordered, 
+                organism = "hsapiens", ordered_query = TRUE, # Biological processes
+                multi_query = FALSE, significant = T, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = T, 
+                user_threshold = 0.05, correction_method = "g_SCS", 
+                domain_scope = "annotated", custom_bg = NULL, 
+                numeric_ns = "", sources = NULL, as_short_link = FALSE)
+
+```
+
+
+```{r}
+gostplot(gostres, capped = TRUE, interactive = F)
+```
+
+
+```{r}
+results <- gostres$result
+results <- results[grep("GO:BP",results$source), ]
+results <- arrange(results,p_value)
+```
+
+Save GO results
+```{r, eval=T}
+write_delim(results, "DEG_output/GO_analysis/GO_Genes_MDD_all_stratified_pt_window_12.csv", delim = ";")
+```
+
+
+```{r}
+
+results_plot <- na.omit(results[1:20,])
+
+p <- ggplot() +
+  geom_point(
+    data = results_plot, 
+    aes(
+      x = reorder(term_name, -log10(p_value)), 
+      y = -log10(p_value),
+      size = intersection_size/term_size  # map size
+    ), 
+    color = "grey50",  # outline color
+    fill = "grey70",   # fill color (uniform)
+    shape = 21
+  ) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    x = "GO:BP", 
+    y = "-log10(adj.p-value)", 
+    size = "GeneRatio"
+  ) +
+  ggtitle("MDD: window_12", subtitle = "Top 20") +
+  guides(fill = "none")  # remove fill legend if still present
+
+cowplot::plot_grid(p, ncol = 1)
+```
+
+
+
+## window_13
+
+```{r}
+# Subset DEGs for the cluster of interest
+cluster_window_13 <- DEG_genes[DEG_genes$cluster == "pt_window_13", ]
+  
+# Identify genetically associated genes
+cluster_window_13$Genetically_Associated <- cluster_window_13$gene %in% OpenTargets_MDD_Genetic_all_
+
+# A: Genetically associated & DE
+genetically_associated_DE_genes_window_13 <- cluster_window_13[cluster_window_13$Genetically_Associated == TRUE, ]
+
+# Print the genes that are both genetically associated and differentially expressed
+print("Genes that are genetically associated and DE for pt_window_13:")
+print(genetically_associated_DE_genes_window_13$gene)
+
+Genes_window_13 <- genetically_associated_DE_genes_window_13$gene
+```
+
+
+Make sure that Genes_window_13 is ordered in the order of smallest p_val_adj 
+```{r}
+DEG_genes_window_13 <- subset(DEG_genes, cluster == "pt_window_13" )
+
+DEG_genes_window_13 <- DEG_genes_window_13 %>%
+  arrange(p_val_adj)
+
+Genes_window_13_ordered <- Genes_window_13[order(match(Genes_window_13, DEG_genes_window_13))]
+Genes_window_13_ordered
+length(Genes_window_13_ordered)
+```
+
+
+GO analysis
+```{r}
+gostres <- gost(query = Genes_window_13_ordered, 
+                organism = "hsapiens", ordered_query = TRUE, # Biological processes
+                multi_query = FALSE, significant = T, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = T, 
+                user_threshold = 0.05, correction_method = "g_SCS", 
+                domain_scope = "annotated", custom_bg = NULL, 
+                numeric_ns = "", sources = NULL, as_short_link = FALSE)
+
+```
+
+
+```{r}
+gostplot(gostres, capped = TRUE, interactive = F)
+```
+
+
+```{r}
+results <- gostres$result
+results <- results[grep("GO:BP",results$source), ]
+results <- arrange(results,p_value)
+```
+
+Save GO results
+```{r, eval=T}
+write_delim(results, "DEG_output/GO_analysis/GO_Genes_MDD_all_stratified_pt_window_13.csv", delim = ";")
+```
+
+
+```{r}
+
+results_plot <- na.omit(results[1:20,])
+
+p <- ggplot() +
+  geom_point(
+    data = results_plot, 
+    aes(
+      x = reorder(term_name, -log10(p_value)), 
+      y = -log10(p_value),
+      size = intersection_size/term_size  # map size
+    ), 
+    color = "grey50",  # outline color
+    fill = "grey70",   # fill color (uniform)
+    shape = 21
+  ) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    x = "GO:BP", 
+    y = "-log10(adj.p-value)", 
+    size = "GeneRatio"
+  ) +
+  ggtitle("MDD: window_13", subtitle = "Top 20") +
+  guides(fill = "none")  # remove fill legend if still present
+
+cowplot::plot_grid(p, ncol = 1)
+```
+
+
+
+# Notes
+
+
+<details>
+  <summary>Click to show Session Info</summary>
+
+```{r}
+sessionInfo()
+```
+
+</details>
+
+
+

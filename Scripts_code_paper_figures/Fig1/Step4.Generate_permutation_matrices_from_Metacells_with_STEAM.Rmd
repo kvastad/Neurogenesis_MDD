@@ -1,0 +1,114 @@
+---
+title: "Step3.Generate_permutation_matrices_from_Metacells_with_STEAM"
+output: 
+  rmarkdown::html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: readable
+vignette: >
+  %\VignetteIndexEntry{My Standalone Vignette}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+---
+
+In this vignette we use a Seurat V5 created seurat object and generate permutation matrices needed for STEAM.
+
+We show how to generate the permutation matrices needed to use STEAM. Using a high number of permutations can be time consuming and we offer an option to utilize multiple local cores running in parallel to enable the permutation matrices generation to be used on a local computer. We recommend to start with 1,000 permutation to get a first impression of the trait enrichment patterns in your data, and then use 10,000 permutations for final results.
+
+
+# Loading libraries
+
+Load libraries.
+```{r, message=FALSE, warning=FALSE}
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(MASS)
+library(future)
+library(parallel)
+library(STEAM)
+```
+
+
+# Load data
+
+
+Load Seurat object.
+```{r}
+se <- readRDS("Seurat_objects/Postnatal_human_seurat_v5_subset_300_filtered_Metacell_SCTransform.rds")
+se
+head(se[[]])
+```
+
+
+Check number of cell per cell type of the cluster annotation you want to create Metacells from.
+```{r}
+table(se$cell_anno)
+```
+
+
+# Generate permutation matrix
+
+IMPORTANT: Please note that the permutation function uses R's random number generator when selecting random genes to be included in the gene lists used for the null distribution and my differ slightly between different R versions. For reproducibility, always keep track of the R version in which the permutation matrix was generated.
+
+In this section we generate permutation matrices that are used as null distributions to calculate the permutation p-values in other vignettes. As this can be time consuming, it is advisable to e.g., run on a high performance computer cluster if available, or use the option below to run on multiple cores of your local computer. We recommend to start with 1,000 permutation to get a first impression of the trait enrichment patterns in your data. This will normally take about 5 to 15 min per matrix depending on the dataset, gene list length and number of cluster. For final results we strongly recommend to use 10,000 permutations for robust results. Please note that the permutation matrices must be run on the same Seurat object (method of creation and filtering) as that of the STEAM analysis, otherwise the statistical assumptions will not be valid.
+```{r}
+# Run sequentially
+perm.mat <- generate_permutation_matrix(se, gnum = 50, permutation_nr = 1000, cluster_anno = "cell_anno")
+perm.mat[1:5,1:5]
+```
+
+
+Save the permutation matrix. It is recommended to save as .rds file for easy loading and use.
+```{r, eval=FALSE}
+saveRDS(perm.mat, file = "permutation_matrices/perm.mat_p1000_g50.rds")
+write.matrix(perm.mat, file=paste0("permutation_matrices/perm.mat_p1000_g50.csv"), sep = ";")
+```
+
+
+# Generate permutation matrix using multiple cores
+
+
+IMPORTANT: Please note that when running multiple processes in parallel the random seed is different. To ensure reproducibility of results, we recommend that you pick one method for your analysis when generating permutation matrices and describe which one in your methods section. When using multiple cores, specify the number of workers selected.
+
+Using multiple core can speed up the generation of permutation matrices considerably. Start by checking how many cores are available on your local computer. Don’t use all cores unless you know your system can handle it.
+```{r}
+detectCores() # Detect number of available cores/workers (logical threads)
+```
+
+
+In this case we have 10 available workers. To empirically investigate what would run fastest on your computer, we recommend testing several different number of workers using a gene list of 50 genes and 100 permutations. 
+```{r, eval=FALSE}
+# Run in parallel
+perm.mat.par <- generate_permutation_matrix(se, gnum = 50, permutation_nr = 100, cluster_anno = "cell_anno", workers = 7)
+perm.mat.par <- generate_permutation_matrix(se, gnum = 50, permutation_nr = 100, cluster_anno = "cell_anno", workers = 5)
+perm.mat.par <- generate_permutation_matrix(se, gnum = 50, permutation_nr = 100, cluster_anno = "cell_anno", workers = 3)
+perm.mat.par <- generate_permutation_matrix(se, gnum = 50, permutation_nr = 100, cluster_anno = "cell_anno", workers = 1)
+```
+
+
+In this case, we select workers = 3 to generate our permutation matrix.
+```{r}
+perm.mat.par <- generate_permutation_matrix(se, gnum = 50, permutation_nr = 10000, cluster_anno = "cell_anno", workers = 3)
+perm.mat.par[1:5,1:5]
+```
+
+
+Save the permutation matrix. It is recommended to save as .rds file for easy loading and use.
+```{r,eval=FALSE}
+saveRDS(perm.mat.par, file = "permutation_matrices/perm.mat.par_p10000_g50.rds")
+write.matrix(perm.mat.par, file=paste0("permutation_matrices/perm.mat.par_p10000_g50.csv"), sep = ";")
+```
+
+
+
+<details>
+  <summary>Click to show Session Info</summary>
+
+```{r}
+sessionInfo()
+```
+
+</details>

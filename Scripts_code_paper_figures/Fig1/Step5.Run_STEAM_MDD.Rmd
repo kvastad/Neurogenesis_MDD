@@ -1,0 +1,425 @@
+---
+title: 'Step5.Run_STEAM_MDD'
+output: 
+  rmarkdown::html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: readable
+vignette: >
+  %\VignetteIndexEntry{My Standalone Vignette}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+---
+
+
+Please note that some steps have been pre-run in a separate vignette to generate the permutation matrices needed and to only keep genes in the gene lists that are present in the Seurat object after QC filtering. In this vignette we use data from our publication and show how that can be used together with the STEAM package.
+
+
+# Load libraries
+
+Load the necessary libraries.
+```{r, message=FALSE, warning=FALSE}
+library(Seurat)
+library(SeuratObject)
+library(dplyr)
+library(MASS)
+library(viridis)
+library(stringr)
+library(ggplot2)
+library(readr)
+library(STEAM)
+```
+
+
+# Load data
+
+
+Load Seurat object.
+```{r}
+se <- readRDS("Seurat_objects/Postnatal_human_seurat_v5_subset_300_filtered_Metacell_SCTransform.rds")
+se
+head(se[[]])
+```
+
+
+
+
+Load ranked gene lists (here from Open Targets). Please note that it is essential for downstream analysis that the gene lists are ranked from this point forward to do empirical selection of top genetic genes.
+```{r class.source = 'fold-show'}
+
+OpenTargets_MDD_Genetic_ <- as.character(t(read.table(file = "data/OpenTargets/ranked_gene_sets/OT-MONDO_0002009-associated-targets-9_15_2026-v26_06_weights_genetics_only_MDD_ranked.csv")))
+length(OpenTargets_MDD_Genetic_)
+
+```
+
+
+# Prepare data for STEAM analysis
+
+
+Filter out genes not present in the Seurat object.
+```{r}
+# Extract gene names from the Seurat object
+gene_names <- rownames(se)
+
+# Remove genes not present in the Seurat object from the gene lists
+OpenTargets_MDD_Genetic_ <- unique(OpenTargets_MDD_Genetic_[OpenTargets_MDD_Genetic_ %in% gene_names])
+length(OpenTargets_MDD_Genetic_)
+```
+
+
+Generate sliding window gene sets from gene lists. Select your choice of trait abbreviation (disease_abbr) and a gene list descriptive term (ot_gene_set_label). We select a window size of 50 genes, moving by 10 genes for each window.
+```{r}
+window_rank_list_MDD_Genetic <- generate_sliding_windows(OpenTargets_MDD_Genetic_, window_size = 50, step_size = 10, disease_abbr = "MDD", ot_gene_set_label = "Genetic")
+```
+
+
+Add gene sets to a list.
+```{r}
+all_gene_sets_OpenTargets <- list(OpenTargets_MDD_Genetic_=OpenTargets_MDD_Genetic_)
+```
+
+
+Merge all gene sets into one list.
+```{r}
+all_gene_sets <- all_gene_sets_OpenTargets
+all_gene_sets <- append(all_gene_sets,window_rank_list_MDD_Genetic)
+```
+
+
+Calculate the average gene expression per gene list and check the percentage of genes present in the Seurat object. It is important that all genes used are present in the Seurat object, otherwise the downstream statistic assumptions are invalid.
+```{r}
+score.mat <- matrix(data = NA, nrow = length(all_gene_sets), ncol = 1, dimnames = list(names(all_gene_sets), "% of genes present"))
+
+for (i in 1:length(all_gene_sets)) {
+  genes <- unlist(all_gene_sets[i]) 
+  score.mat[i] <- mean(genes %in% rownames(se))
+  se <- AddModuleScore(se,list(genes), ctrl = 100, name = list(names(all_gene_sets[i])))
+}
+
+score.mat*100
+```
+
+
+Load permutation matrices for your selected window size and genetic gene list (see separate vignette on how to generate these). OBS! Make sure that you create the Seurat object in the same way (package and filtering) when generating permutation matrices as when you run STEAM.
+```{r}
+
+perm_files <- c(
+  "Permutation_matrices/perm.mat.par_p10000_g50.rds"
+)
+
+perm_matrices <- load_permutation_matrices(perm_files)
+perm.mat.window.data <- as.data.frame(perm_matrices[[1]])
+
+perm.mat.window.data[1:5,1:5]
+```
+
+
+# Empirical selection of top genetic genes
+
+
+Derive an empirical threshold for top genes of a ranked gene list by comparing the ranked window gene set signal to a null gene set of equal size.
+```{r}
+ window_results.g <- window_rank_enrichment_analysis(
+   se = se,
+   perm.mat.window.data = perm.mat.window.data,
+   window_rank_list = window_rank_list_MDD_Genetic,
+   ot_gene_set_label = "Genetic",
+   disease_abbr = "MDD",
+   cluster_anno = "cell_anno",
+   imputation = "dynamic"#,
+   #log_file = "data/Data_brain_example/log_files/log_file_pval_mat_genetic_window_SC_MDD.txt"
+ )
+
+head(window_results.g)
+```
+
+
+Plot median scores for each window in each cluster. Use these to identify sets of top genes. The lines represent the null distribution where, blue line = median, bright red = 95-quantile, dark red = max value. Here we see that for several clusters the top 13 windows have signal above the max value, and we know the window size is 50 and moves by 10. Thus, we select the top 170 genes in this list to be our top set of genes.
+```{r}
+rank_plot_for_clusters(
+   window_results = window_results.g,
+   perm.mat.window = perm.mat.window.data,
+   ylim = c(-0.3, 0.9)
+ )
+
+```
+
+
+```{r, eval=FALSE}
+rank_plot_for_clusters(
+   window_results = window_results.g,
+   perm.mat.window = perm.mat.window.data,
+   ylim = c(-0.3, 0.9),
+   clusters_to_plot = c("In","YGN","NB")
+ )
+
+```
+
+
+# Plot sliding window enrichment
+
+
+Do multiple correction of p-values based on number of windows.
+```{r}
+window_results.g$p_value.adj <- p.adjust(window_results.g$p_value,method = "BH")
+```
+
+
+Add stars for plotting based on p_value.adj.
+```{r}
+window_results.g <- window_results.g%>%
+  mutate(significance.level = ifelse(p_value.adj < 0.001, "***",
+                     ifelse(p_value.adj < 0.01, "**",
+                     ifelse(p_value.adj < 0.05, "*",
+                     ""))))
+
+
+window_results.g <- window_results.g%>%
+  mutate(significant = ifelse(p_value.adj < 0.05, "TRUE",
+                     "FALSE"))
+
+
+head(window_results.g)
+```
+
+
+Update cluster names in the cluster column.
+```{r}
+window_results.g$cluster <- gsub("^cluster_", "", window_results.g$cluster)
+```
+
+
+Plot WindowRankEnrichmentAnalysis results.
+```{r, fig.width=50, fig.height=50}
+
+# Set the order of window based on the original order of rbind
+window_results.g$window <- factor(window_results.g$window, 
+                                     rev(unique(window_results.g$window)))
+
+
+# Create the plot
+p_all <- window_results.g %>%
+  ggplot(aes(x = cluster, y = window)) +
+  geom_tile(aes(fill = -log10(p_value.adj)), colour = "grey20") +  # Fill with adjusted p-value
+  geom_text(data = window_results.g %>% filter(significant == TRUE),
+            aes(label = significance.level),
+            vjust = 0.75,
+            size = 10,
+            fontface = "bold") +
+  theme(
+    legend.key.width = unit(1.5, "cm"),
+    legend.key.height = unit(1.5, "cm"),
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 40),
+    axis.text.y = element_text(size = 15),axis.title.x = element_text(size = 40, face = "bold"),axis.title.y = element_text(size = 40, face = "bold"),plot.title = element_text(size = 50, face = "bold"),legend.title = element_text(size = 40),legend.text = element_text(size = 40)
+  ) +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 22)) +
+  coord_fixed(ratio = 0.25) +  # May need to adjust or remove if you want free y scaling
+  labs(title = "All genetically associated MDD genes",x = "Cluster", y = "Window rank", fill = "-log10(adj p-value) \n Benjamini & Hochberg") +
+  scale_fill_viridis_c(begin = 0.2, option = "viridis") +
+  scale_color_manual(values = c("*" = "white", "**" = "white", "***" = "white"),  
+                     labels = c("***" = "***  p < 0.001", "**" = "**  p < 0.01", "*" = "*  p < 0.05"),
+                     guide = guide_legend(override.aes = list(shape = c(21, 21, 23),
+                                                              fill = c("white", "white", "white"),
+                                                              size = 4)))
+
+p_all
+```
+
+
+PDF
+```{r}
+pdf(file = "STEAM_plots/WindowRankEnrichmentPlot_MDD.pdf", height = 50, width = 50)
+
+p_all
+
+dev.off()
+```
+
+
+# Fisher's exact test
+
+
+Load DEGs data.
+```{r}
+DEG_genes <- read_csv2("DEG_output/DE_genes.csv")
+DEG_genes <- as.data.frame(DEG_genes)
+DEG_genes$p_val_adj <- as.numeric(DEG_genes$p_val_adj)
+DEG_genes <- subset(DEG_genes, subset = p_val_adj <= 0.05) # using only significant DEG
+```
+
+
+Subset to select the top ranked genes.
+```{r}
+OpenTargets_MDD_Genetic_top <- OpenTargets_MDD_Genetic_[1:150]
+length(OpenTargets_MDD_Genetic_top)
+```
+
+
+
+```{r}
+run_fisher_test_degs_v3 <- function(se, DEG_genes, OT_genes, adjust_method = "bonferroni", test_alternative = "greater") {
+  
+  total_genes <- rownames(se)
+  
+  # Prepare lists to store results
+  fisher_results_list <- list()
+  
+  for (cluster in unique(DEG_genes$cluster)) {
+    cluster_data <- DEG_genes[DEG_genes$cluster == cluster, ]
+    cluster_data$Genetically_Associated <- cluster_data$gene %in% OT_genes
+    
+    # Counts
+    A <- sum(cluster_data$Genetically_Associated) # DEG & OT
+    B <- length(cluster_data$gene) - A # DEG & not OT
+    not_DE_genes <- setdiff(total_genes, cluster_data$gene)
+    C <- sum(not_DE_genes %in% OT_genes) # non-DEG & OT
+    D <- length(not_DE_genes) - C # non-DEG & not OT
+    
+    # 2x2 contingency table
+    fisher_matrix <- matrix(c(A, B, C, D), nrow = 2, byrow = TRUE,
+                            dimnames = list(c("DEG", "Not_DEG"), c("OT_gene", "Not_OT_gene")))
+    
+    # Fisher test
+    fisher_test <- fisher.test(fisher_matrix, alternative = test_alternative)
+    
+    # Proportions
+    prop_DEG <- A / (A + B)
+    prop_background <- C / (C + D)
+    
+    # OR and log2_OR
+    OR <- (A * D) / (B * C)
+    log2_OR <- log2(OR)
+    
+    # Combine everything in one row
+    fisher_results_list[[cluster]] <- data.frame(
+      cluster = cluster,
+      A = A, B = B, C = C, D = D,
+      prop_DEG = prop_DEG,
+      prop_background = prop_background,
+      OR = OR,
+      log2_OR = log2_OR,
+      CI_lower = fisher_test$conf.int[1],
+      CI_upper = fisher_test$conf.int[2],
+      p_value = fisher_test$p.value,
+      stringsAsFactors = FALSE
+    )
+  }
+  
+  # Combine all clusters
+  fisher_results <- do.call(rbind, fisher_results_list)
+  
+  # Adjust p-values
+  fisher_results$adj_p_value <- p.adjust(fisher_results$p_value, method = adjust_method)
+  
+  return(fisher_results)
+}
+
+```
+
+
+Run Fisher's exact test.
+```{r}
+fisher_results <- run_fisher_test_degs_v3(se, DEG_genes = DEG_genes, OT_genes = OpenTargets_MDD_Genetic_top)
+fisher_results
+```
+
+
+Save Fisher's exact test results
+```{r, eval=T}
+write.table(fisher_results,file="DEG_output/Fishers_exact_test_MDD_top.csv", col.names = T, row.names = F,quote = FALSE,sep = ";")
+```
+
+
+Plot results.
+```{r, fig.height=10, fig.width=25}
+# Ensure clusters are ordered by significance
+fisher_results$cluster <- factor(fisher_results$cluster, 
+                                 levels = fisher_results$cluster[order(fisher_results$adj_p_value)])
+
+# Create the updated plot with viridis scale
+p1 <- ggplot(fisher_results, aes(x = cluster, color = -log10(p_value), y = -log10(adj_p_value), size = OR)) +
+  geom_point() +  
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray50") +  
+  scale_color_viridis(option = "D", direction = 1, name = "-log10(p-value)") +  # Use Viridis color scale
+  scale_size_continuous(range = c(2, 8), name = "Odds ratio") +  
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1,size = 14),axis.text.y = element_text(size = 14),axis.title.x = element_text(size = 16, face = "bold"),axis.title.y = element_text(size = 16, face = "bold"),plot.title = element_text(size = 18, face = "bold"),legend.title = element_text(size = 14),legend.text = element_text(size = 12)) +  
+  labs(title = "Top MDD genes",
+       x = "Cell types",
+       y = "-log10(adj p-value)") +
+  guides(color = guide_colorbar(order = 1), size = guide_legend(order = 2))
+
+p1
+```
+
+
+PDF
+```{r}
+pdf(file = "STEAM_plots/fishers_exact_test_DEGup_topSTEAM_MDD.pdf", height = 7, width = 6)
+
+p1
+
+dev.off()
+```
+
+
+Run Fisher's exact test.
+```{r}
+fisher_results <- run_fisher_test_degs_v3(se, DEG_genes = DEG_genes, OT_genes = OpenTargets_MDD_Genetic_)
+fisher_results
+```
+
+
+Save Fisher's exact test results
+```{r, eval=T}
+write.table(fisher_results,file="DEG_output/Fishers_exact_test_MDD_all.csv", col.names = T, row.names = F,quote = FALSE,sep = ";")
+```
+
+
+Plot results.
+```{r, fig.height=10, fig.width=25}
+# Ensure clusters are ordered by significance
+fisher_results$cluster <- factor(fisher_results$cluster, 
+                                 levels = fisher_results$cluster[order(fisher_results$adj_p_value)])
+
+# Create the updated plot with viridis scale
+p2 <- ggplot(fisher_results, aes(x = cluster, color = -log10(p_value), y = -log10(adj_p_value), size = OR)) +
+  geom_point() +  
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray50") +  
+  scale_color_viridis(option = "D", direction = 1, name = "-log10(p-value)") +  # Use Viridis color scale
+  scale_size_continuous(range = c(2, 8), name = "Odds ratio") +  
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1,size = 14),axis.text.y = element_text(size = 14),axis.title.x = element_text(size = 16, face = "bold"),axis.title.y = element_text(size = 16, face = "bold"),plot.title = element_text(size = 18, face = "bold"),legend.title = element_text(size = 14),legend.text = element_text(size = 12)) +  
+  labs(title = "All MDD genes",
+       x = "Cell types",
+       y = "-log10(adj p-value)") +
+  guides(color = guide_colorbar(order = 1), size = guide_legend(order = 2))
+
+p2
+```
+
+
+PDF
+```{r}
+pdf(file = "STEAM_plots/fishers_exact_test_DEGup_all_MDD.pdf", height = 7, width = 6)
+
+p2
+
+dev.off()
+```
+
+
+
+
+
+<details>
+  <summary>Click to show Session Info</summary>
+
+```{r}
+sessionInfo()
+```
+
+</details>
+

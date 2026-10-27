@@ -1,0 +1,212 @@
+---
+title: "generarte_seurat_objects"
+output: 
+  rmarkdown::html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: readable
+vignette: >
+  %\VignetteIndexEntry{My Standalone Vignette}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+Load libraries
+```{r, message=FALSE}
+library(Seurat)
+library(Matrix)
+library(dplyr)
+```
+
+
+Function to read each dataset
+```{r}
+read_10x_custom <- function(prefix) {
+  mtx <- paste0(prefix, "_matrix.mtx")
+  features <- paste0(prefix, "_features.tsv")
+  barcodes <- paste0(prefix, "_barcodes.tsv")
+
+  data <- readMM(mtx)
+  genes <- read.delim(features, header = FALSE, stringsAsFactors = FALSE)
+  cells <- read.delim(barcodes, header = FALSE, stringsAsFactors = FALSE)
+
+  rownames(data) <- genes[, 1]
+  colnames(data) <- cells[, 1]
+  
+  return(data)
+}
+
+```
+
+
+Read samples into a list (ages 0 - 5)
+
+1623, 2975, 835, 2596, 4455 and A10895.
+```{r}
+data_dir <- "gene_expression_data"
+
+samples <- c("HP1623_1", "HP1623_2", "HP2975_1", "HP2975_2", "HP835_1", "HP835_2", "HP2596_1", "HP2596_2", "HP4455_1", "HP4455_2", "HP4455_3", "HPA10895_1", "HPA10895_2")
+
+data_list <- lapply(samples, function(s) read_10x_custom(file.path(data_dir, s)))
+
+names(data_list) <- samples
+
+```
+
+
+Create Seurat objects
+```{r}
+seurat_list <- lapply(samples, function(s) {
+  obj <- CreateSeuratObject(counts = data_list[[s]], project = s)
+  return(obj)
+})
+names(seurat_list) <- samples
+
+head((seurat_list[[1]]))
+```
+
+
+Read metadata into a list
+```{r}
+metadata_dir <- "childhood_hippocampus_snRNAseq_metadata"
+
+# List all metadata files
+meta_files <- list.files(metadata_dir, pattern = "_metadata.tsv$", full.names = TRUE)
+
+# Extract sample IDs from file names
+sample_ids <- gsub("_metadata.tsv$", "", basename(meta_files))
+
+# Read all metadata into a list
+metadata_list <- lapply(meta_files, function(f) {
+  read.delim(f, header = TRUE, stringsAsFactors = FALSE, row.names = 1)
+})
+
+names(metadata_list) <- sample_ids
+
+```
+
+
+Add metadata to Seurat objects if available
+```{r}
+# Loop over your existing Seurat objects
+seurat_list <- lapply(names(seurat_list), function(s) {
+  seurat_obj <- seurat_list[[s]]
+  
+  if (s %in% names(metadata_list)) {
+    meta <- metadata_list[[s]]
+    common_cells <- intersect(colnames(seurat_obj), rownames(meta))
+    if (length(common_cells) > 0) {
+      seurat_obj <- AddMetaData(seurat_obj, metadata = meta[common_cells, , drop = FALSE])
+    } else {
+      warning(paste("No matching cells found for sample", s))
+    }
+  } else {
+    warning(paste("No metadata found for sample", s))
+  }
+  
+  return(seurat_obj)
+})
+
+# Keep the original Seurat names
+names(seurat_list) <- names(data_list)  # or `names(seurat_list)` before lapply
+
+head((seurat_list[[1]]))
+table((seurat_list[[1]])$active.ident)
+```
+
+Rename from active.ident to cell_anno
+```{r}
+for (i in names(seurat_list)) {
+  seurat_obj <- seurat_list[[i]]
+  
+  # Copy active.ident to a new column called 'cell_anno'
+  seurat_obj$cell_anno <- seurat_obj$active.ident
+  
+  # Remove active.ident
+  seurat_obj$active.ident <- NULL
+  
+  seurat_list[[i]] <- seurat_obj
+}
+
+head((seurat_list[[1]]))
+table((seurat_list[[1]])$cell_anno)
+```
+
+
+Subset each Seurat object to remove doublet cells
+```{r}
+seurat_list <- lapply(seurat_list, function(seurat_obj) {
+  # Keep only cells where cell_anno is NOT "doublet"
+  seurat_obj <- subset(seurat_obj, subset = cell_anno != "doublet")
+  return(seurat_obj)
+})
+
+head((seurat_list[[1]]))
+table((seurat_list[[1]])$cell_anno)
+```
+
+Merge all Seurat objects.
+```{r}
+# Merge all objects in the list
+combined <- merge(
+  x = seurat_list[[1]],               # the first Seurat object
+  y = seurat_list[-1],                # the rest of the list
+  add.cell.ids = names(seurat_list),  # prepend sample IDs to cell names to keep them unique
+  project = "Combined"
+)
+
+```
+
+
+Check
+```{r}
+combined
+table(combined$cell_anno)   # check cell type distribution
+table(combined$orig.ident)  # check sample origin
+
+```
+
+Join layers
+```{r}
+combined <- JoinLayers(combined)
+
+combined
+table(combined$cell_anno)   # check cell type distribution
+table(combined$orig.ident)  # check sample origin
+
+```
+
+Save
+```{r}
+saveRDS(combined, file = "Postnatal_human_seurat_v5.rds")
+```
+
+
+Subsample to include max 300 cells per cell type.
+```{r}
+library(dplyr)
+
+meta <- combined@meta.data
+meta$cell <- rownames(meta)  # keep cell names
+
+set.seed(123)  # for reproducibility
+
+cells_to_keep <- meta %>%
+  group_by(cell_anno) %>%
+  group_modify(~ {
+    n_cells <- nrow(.x)
+    .x %>%
+      slice_sample(n = ifelse(n_cells > 300, 300, n_cells))
+  }) %>%
+  pull(cell)
+
+combined_sub <- subset(combined, cells = cells_to_keep)
+
+table(combined_sub$cell_anno)
+```
+
+Save
+```{r}
+saveRDS(combined_sub, file = "Postnatal_human_seurat_v5_subset_300.rds")
+```

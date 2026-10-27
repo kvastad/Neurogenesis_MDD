@@ -1,0 +1,231 @@
+---
+title: "Step3.Plot_Jaccard_index_traits"
+output: 
+  rmarkdown::html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: readable
+vignette: >
+  %\VignetteIndexEntry{My Standalone Vignette}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+Load libraries
+```{r, message=FALSE}
+library(Seurat)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(ComplexHeatmap)
+library(circlize)
+```
+
+
+Load data
+```{r}
+OpenTargets_ALS_Genetic_ <- as.character(t(read.table(file = "data/OpenTargets/ranked_gene_sets/OT-MONDO_0004976-associated-targets-9_15_2026-v26_06_weights_genetics_only_ALS_ranked.csv")))
+length(OpenTargets_ALS_Genetic_)
+
+
+OpenTargets_BIP_Genetic_ <- as.character(t(read.table(file = "data/OpenTargets/ranked_gene_sets/OT-MONDO_0004985-associated-targets-9_15_2026-v26_06_weights_genetics_only_BIP_ranked.csv")))
+length(OpenTargets_BIP_Genetic_)
+
+
+OpenTargets_MDD_Genetic_ <- as.character(t(read.table(file = "data/OpenTargets/ranked_gene_sets/OT-MONDO_0002009-associated-targets-9_15_2026-v26_06_weights_genetics_only_MDD_ranked.csv")))
+length(OpenTargets_MDD_Genetic_)
+
+
+OpenTargets_PAR_Genetic_ <- as.character(t(read.table(file = "data/OpenTargets/ranked_gene_sets/OT-MONDO_0005180-associated-targets-9_15_2026-v26_06_weights_genetics_only_PAR_ranked.csv")))
+length(OpenTargets_PAR_Genetic_)
+
+
+OpenTargets_SCZ_Genetic_ <- as.character(t(read.table(file = "data/OpenTargets/ranked_gene_sets/OT-MONDO_0005090-associated-targets-9_15_2026-v26_06_weights_genetics_only_SCZ_ranked.csv")))
+length(OpenTargets_SCZ_Genetic_)
+
+```
+
+
+
+
+```{r}
+gene_lists <- list(
+  ALS = OpenTargets_ALS_Genetic_,
+  BIP = OpenTargets_BIP_Genetic_,
+  MDD = OpenTargets_MDD_Genetic_,
+  PAR = OpenTargets_PAR_Genetic_,
+  SCZ = OpenTargets_SCZ_Genetic_
+)
+
+sapply(gene_lists, length)
+```
+
+
+```{r}
+jaccard_index <- function(gene_lists) {
+  n <- length(gene_lists)
+  mat <- matrix(0, n, n)
+  rownames(mat) <- colnames(mat) <- names(gene_lists)
+
+  for (i in 1:n) {
+    for (j in 1:n) {
+      inter <- length(intersect(gene_lists[[i]], gene_lists[[j]]))
+      union <- length(union(gene_lists[[i]], gene_lists[[j]]))
+      mat[i, j] <- inter / union
+    }
+  }
+  mat
+}
+
+jac_matrix <- jaccard_index(gene_lists)
+jac_matrix
+
+```
+
+
+
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+
+# Define the color mapping
+col_fun <- colorRamp2(c(0, 1), c("white", "darkred"))
+
+# Create the heatmap with numbers
+h <- Heatmap(jac_matrix,
+        name = "Jaccard",
+        col = col_fun,
+        cluster_rows = TRUE,
+        cluster_columns = TRUE,
+        show_row_names = TRUE,
+        show_column_names = TRUE,
+        row_names_gp = gpar(fontsize = 20),   
+        column_names_gp = gpar(fontsize = 20),
+        cell_fun = function(j, i, x, y, width, height, fill) {
+            grid.text(sprintf("%.2f", jac_matrix[i, j]), x, y, gp = gpar(fontsize = 20))
+        },
+             heatmap_legend_param = list(
+                 title_gp = gpar(fontsize = 20),   # legend title size
+                 labels_gp = gpar(fontsize = 15)   # legend labels size
+             ))
+
+h
+```
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("plots/Jaccard_index_all_OT_genes.pdf", width = 8, height = 6)  # width & height in inches
+
+h
+
+# Close PDF device
+dev.off()
+```
+
+
+
+
+Load Seurat object.
+```{r}
+se <- readRDS("Seurat_objects/Postnatal_human_seurat_v5_GNxEarly_filtered_trajectory_lineage_cells_harmony_no_outliers.rds")
+se
+head(se[[]])
+```
+
+
+```{r}
+# Extract gene names from your Seurat object
+gene_names <- rownames(se)
+
+# Filter each gene list to keep only genes present in the Seurat object
+gene_lists_filtered <- lapply(gene_lists, function(x) unique(x[x %in% gene_names]))
+
+# Check lengths
+sapply(gene_lists_filtered, length)
+
+```
+
+
+
+```{r}
+# Example: define number of top genes per list
+top_n_genes <- c(
+  ALS = 90,
+  BIP = 80,
+  MDD = 160,
+  PAR = 250,
+  SCZ = 130
+)
+
+```
+
+
+
+```{r}
+#Subset each gene list
+gene_lists_top <- mapply(function(genes, n) {
+  # Take top n genes or all if list is shorter than n
+  head(genes, min(length(genes), n))
+}, gene_lists_filtered, top_n_genes, SIMPLIFY = FALSE)
+
+sapply(gene_lists_top, length)
+```
+
+
+
+```{r}
+jac_matrix_top <- jaccard_index(gene_lists_top)
+jac_matrix_top
+```
+
+
+```{r}
+# Define the color mapping
+col_fun <- colorRamp2(c(0, 1), c("white", "darkred"))
+
+# Create the heatmap with numbers
+h <- Heatmap(jac_matrix_top,
+        name = "Jaccard",
+        col = col_fun,
+        cluster_rows = TRUE,
+        cluster_columns = TRUE,
+        show_row_names = TRUE,
+        show_column_names = TRUE,
+        row_names_gp = gpar(fontsize = 20),   
+        column_names_gp = gpar(fontsize = 20),
+        cell_fun = function(j, i, x, y, width, height, fill) {
+            grid.text(sprintf("%.2f", jac_matrix[i, j]), x, y, gp = gpar(fontsize = 20))
+        },
+             heatmap_legend_param = list(
+                 title_gp = gpar(fontsize = 20),   # legend title size
+                 labels_gp = gpar(fontsize = 15)   # legend labels size
+             ))
+
+h
+```
+
+
+
+Save
+```{r, eval=T}
+# Open PDF device
+pdf("plots/Jaccard_index_top_genes.pdf", width = 8, height = 6)  # width & height in inches
+
+h
+
+# Close PDF device
+dev.off()
+```
+
+
+<details>
+  <summary>Click to show Session Info</summary>
+
+```{r}
+sessionInfo()
+```
+
+</details>

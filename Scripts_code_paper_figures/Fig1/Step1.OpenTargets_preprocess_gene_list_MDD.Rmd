@@ -1,0 +1,72 @@
+---
+title: "Step1: Preprocess gene list"
+output: 
+  rmarkdown::html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: readable
+vignette: >
+  %\VignetteIndexEntry{My Standalone Vignette}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+---
+
+Load Open Targets data, selecting to include ranked genes with genetic associations to Major Depressive Disorder (MDD) (MONDO_0002009).
+
+# Load gene list
+
+Load libraries.
+```{r, message=FALSE, warning=FALSE}
+library(readr)
+library(dplyr)
+```
+
+Load data.
+```{r, message=FALSE, warning=FALSE}
+data <- read_tsv("data/OpenTargets/OT-MONDO_0002009-associated-targets-9_15_2026-v26_06_weights_genetics_only_MDD.tsv")
+```
+
+
+# Filter gene list
+
+Select data columns and subset.
+```{r}
+# Here, gene names, Open Targets association scores, and  all columns containing genetic association scores from different databases
+columns_genetic <- colnames(data[1:12])
+columns_genetic
+data_sub <- subset(data, select = columns_genetic)
+```
+
+
+Remove rows containing 'No data' for genetic associations
+```{r}
+# Define the columns to check, here all columns containing genetic association scores from different databases
+columns_to_check <- colnames(data_sub[4:12])
+
+# Filter the data frame
+data_sub_filtered <- data_sub %>%
+  filter(!if_all(all_of(columns_to_check), ~ .x == "No data"))
+
+head(data_sub_filtered)
+```
+
+# Save gene list
+
+Save the ranked gene set. Ranking is based on the Open Targets globalScore.
+```{r, eval=T}
+ranked_gene_set <- data_sub_filtered$symbol
+
+write.table(ranked_gene_set, file = "data/OpenTargets/ranked_gene_sets/OT-MONDO_0002009-associated-targets-9_15_2026-v26_06_weights_genetics_only_MDD_ranked.csv", row.names = FALSE, col.names = FALSE, quote = FALSE, sep = ",")
+```
+
+
+<details>
+  <summary>Click to show Session Info</summary>
+
+```{r}
+sessionInfo()
+```
+
+</details>
